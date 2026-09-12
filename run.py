@@ -49,14 +49,17 @@ def args_parse(argv=None):
         ("min-elongation", 1.8),
         ("min-caliber-mm", 1.10),
         ("max-caliber-mm", 14.0),
-        ("max-caliber-ratio", 2.5),
+        ("max-caliber-ratio", 2.0),
         ("min-bright-ratio", 0.35),
         ("trace-mm", 10.0),
         ("seed-mm", 5.0),
         ("min-radius-mm", 0.4),
         ("bifurcation-step-mm", 0.75),
-        ("dedup-mm", 2.0),
-        ("dedup-direction-dot", 0.85),
+        ("dedup-mm", 3.0),
+        ("dedup-direction-dot", 0.80),
+        ("dedup-path-mm", 5.0),
+        ("dedup-path-distance-mm", 1.5),
+        ("dedup-path-overlap-frac", 0.60),
     ]:
         p.add_argument("--" + name, type=float, default=default)
     p.add_argument("--hu-ceiling", type=float)
@@ -447,7 +450,6 @@ def orient_path_outward(c, path, ostium_idx):
 
 
 def true_ostium_from_path(c, path):
-    """Map the proximal traced daughter point to its nearest true aortic wall voxel."""
     q = np.rint(path[0]).astype(int)
     for k in range(3):
         q[k] = np.clip(q[k], 0, c["mask"].shape[k] - 1)
@@ -470,7 +472,6 @@ def outward_progress_fraction(c, path):
 
 
 def path_caliber_samples(gr, db, path, arc, sp, path_length):
-    """Sample proximal caliber along the actual daughter path at ~2, 5 and 8 mm."""
     samples = []
     for target in (2.0, 5.0, 8.0):
         if target > path_length + float(sp.max()):
@@ -515,9 +516,6 @@ def measure(c, b, a):
         return None, "path too short"
 
     path = orient_path_outward(c, path, b["ostium_idx"])
-
-    # Improvement 1: define the actual ostium from the traced proximal path,
-    # rather than from the average of a broad wall association patch.
     true_ostium = true_ostium_from_path(c, path)
     if c["cap_wall"][tuple(np.rint(true_ostium).astype(int))]:
         return None, "true ostium on flat crop cap"
@@ -536,8 +534,6 @@ def measure(c, b, a):
         return None, f"outward progress {progress:.2f} < {a.min_outward_progress_frac:.2f}"
 
     db = ndimage.distance_transform_edt(gr, sampling=sp)
-
-    # Improvement 2: verify stable vessel caliber over the proximal course.
     caliber_samples = path_caliber_samples(gr, db, path, arc, sp, path_length)
     if len(caliber_samples) >= 2:
         radii = np.asarray([x[1] for x in caliber_samples], float)
@@ -589,7 +585,6 @@ def measure(c, b, a):
     if outward_dot < a.min_outward_dot:
         return None, f"outward dot {outward_dot:.2f} < {a.min_outward_dot:.2f}"
 
-    # Improvement 3: the branch-angle rule is a hard minimum of 20 degrees.
     required_angle = max(20.0, float(a.min_branch_angle_deg))
     if angle < required_angle:
         return None, f"branch angle {angle:.1f} < {required_angle:.1f} deg"
@@ -609,15 +604,44 @@ def measure(c, b, a):
     return b, None
 
 
-def deduplicate(found, a):
-    """Collapse traces that converge to the same true wall opening."""
+def proximal_path(path, sp, max_mm):
+    """Return the first max_mm of a traced path in physical-scaled coordinates."""
+    p = np.asarray(path, float)
+    if len(p) < 2:
+        return p * sp
+    arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(p, axis=0) * sp, axis=1))]
+    use = arc <= max_mm + float(sp.max())
+    q = p[use]
+    return q * sp
+
+
+def proximal_path_overlap(b, q, sp, a):
+    """Fraction of proximal path points that lie close to the other trace."""
+    p1 = proximal_path(b["path"], sp, a.dedup_path_mm)
+    p2 = proximal_path(q["path"], sp, a.dedup_path_mm)
+    if len(p1) < 2 or len(p2) < 2:
+        return 0.0
+    d = np.linalg.norm(p1[:, None, :] - p2[None, :, :], axis=2)
+    f1 = float(np.mean(d.min(axis=1) <= a.dedup_path_distance_mm))
+    f2 = float(np.mean(d.min(axis=0) <= a.dedup_path_distance_mm))
+    return min(f1, f2)
+
+
+def deduplicate(found, a, c):
+    """Collapse candidates sharing one wall opening and the same proximal branch."""
     kept = []
+    sp = c["spacing"]
     for b in sorted(found, key=lambda x: (-x["radial_reach"], -x["bright_ratio"])):
         duplicate = False
         for q in kept:
-            d = np.linalg.norm(b["ostium_mm"] - q["ostium_mm"])
+            ostium_dist = np.linalg.norm(b["ostium_mm"] - q["ostium_mm"])
             align = float(np.dot(b["direction"], q["direction"]))
-            if d <= a.dedup_mm and align >= a.dedup_direction_dot:
+            overlap = proximal_path_overlap(b, q, sp, a)
+            if (
+                ostium_dist <= a.dedup_mm
+                and align >= a.dedup_direction_dot
+                and overlap >= a.dedup_path_overlap_frac
+            ):
                 duplicate = True
                 break
         if not duplicate:
@@ -691,9 +715,9 @@ def main(argv=None):
             found.append(y)
 
     before_dedup = len(found)
-    found = deduplicate(found, a)
+    found = deduplicate(found, a, c)
     if before_dedup > len(found):
-        rejects.extend(["same-ostium duplicate"] * (before_dedup - len(found)))
+        rejects.extend(["same-ostium proximal-path duplicate"] * (before_dedup - len(found)))
 
     caseid = os.path.basename(os.path.dirname(os.path.abspath(a.image))) or "case"
     out = emit(caseid, found, a.output)
