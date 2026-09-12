@@ -160,6 +160,14 @@ def geometry(c, a):
         xx = ndimage.gaussian_filter1d(xx, max(0.5, 3 / sp[0]))
     else:
         yy, xx = cy, cx
+
+    # Estimate visible aortic centreline length in physical millimetres.
+    if len(zs) > 1:
+        centres_mm = np.column_stack((zs * sp[0], yy[zs] * sp[1], xx[zs] * sp[2]))
+        aorta_length_mm = float(np.linalg.norm(np.diff(centres_mm, axis=0), axis=1).sum())
+    else:
+        aorta_length_mm = float(sp[0])
+
     tang = np.zeros((m.shape[0], 3))
     for z in zs:
         z0 = max(int(z) - 2, int(zs[0]))
@@ -201,7 +209,9 @@ def geometry(c, a):
         aorta_tangent_zyx=tang,
         aorta_center_y=yy,
         aorta_center_x=xx,
+        aorta_length_mm=aorta_length_mm,
     )
+    log(a.debug, f"visible aorta centreline length={aorta_length_mm:.1f} mm")
     return c
 
 
@@ -218,13 +228,7 @@ def local_wall_normal(c, ostium_idx):
 
 
 def candidate_openings(c, a):
-    """Find outward tubes first, then anchor each one back to the supplied mask wall.
-
-    The distal shell at >= min_radial_reach_mm breaks the bright partial-volume rim
-    around the aorta into separate outward continuations. Each continuation is then
-    associated with a local wall patch, instead of labeling the whole bright wall rim
-    as one candidate.
-    """
+    """Find outward tubes first, then anchor each one back to the supplied mask wall."""
     v, m, d, near, sp = c["vol"], c["mask"], c["dout"], c["near"], c["spacing"]
     bright = (v >= c["thr"]) & (v <= c["ceiling"])
     outside = bright & (~m) & (d > 0) & (d <= a.grow_mm)
@@ -247,14 +251,12 @@ def candidate_openings(c, a):
         distal_pts = np.argwhere(lab == li)
         if len(distal_pts) < a.min_distal_voxels:
             continue
-
         distal_mask = lab == li
         distal_feet = np.stack([near[k][distal_mask] for k in range(3)], 1)
         valid = ~c["cap_wall"][tuple(distal_feet.T)]
         distal_feet = distal_feet[valid]
         if not len(distal_feet):
             continue
-
         foot0 = np.median(distal_feet, axis=0)
         if len(start_pts_all):
             wall_dist = np.linalg.norm((start_feet_all - foot0) * sp, axis=1)
@@ -264,21 +266,17 @@ def candidate_openings(c, a):
         else:
             starts = np.empty((0, 3), int)
             feet = np.empty((0, 3), int)
-
         if len(starts) < a.min_cand_voxels:
             continue
-
         feet_unique = np.unique(feet, axis=0)
         if len(feet_unique) < a.min_wall_patch_voxels:
             continue
         ostium = feet_unique.mean(axis=0)
-
         distal_centre = distal_pts.mean(axis=0)
         daughter_hint = unit((distal_centre - ostium) * sp)
         outward_dot = float(np.dot(local_wall_normal(c, ostium), daughter_hint))
         if outward_dot < a.min_outward_dot:
             continue
-
         out.append(
             dict(
                 wall_id=li,
@@ -290,7 +288,6 @@ def candidate_openings(c, a):
                 outward_dot_hint=outward_dot,
             )
         )
-
     log(
         a.debug,
         f"outward-tube candidates: {len(out)} "
@@ -323,6 +320,8 @@ def grow(c, b, a):
     radial_reach = float(d[gr].max())
     if reach < a.min_reach_mm:
         return None, f"outside path reach {reach:.1f} < {a.min_reach_mm} mm"
+    if reach > c["aorta_length_mm"]:
+        return None, f"outside path reach {reach:.1f} > aorta length {c['aorta_length_mm']:.1f} mm"
     if radial_reach < a.min_radial_reach_mm:
         return None, f"radial reach {radial_reach:.1f} < {a.min_radial_reach_mm} mm"
 
@@ -426,6 +425,30 @@ def branch_angle_deg(c, ostium_idx, seed_idx):
     return float(np.degrees(np.arccos(dot)))
 
 
+def distance_to_mask(c, p):
+    q = np.rint(p).astype(int)
+    for k in range(3):
+        q[k] = np.clip(q[k], 0, c["dout"].shape[k] - 1)
+    return float(c["dout"][tuple(q)])
+
+
+def orient_path_outward(c, path, ostium_idx):
+    """Orient a traced path from the aortic wall toward the daughter."""
+    path = np.asarray(path, float).copy()
+    d0 = distance_to_mask(c, path[0])
+    d1 = distance_to_mask(c, path[-1])
+    if d0 > d1 + 1e-6:
+        path = path[::-1].copy()
+    elif abs(d0 - d1) <= 1e-6:
+        sp = c["spacing"]
+        o = np.asarray(ostium_idx, float)
+        r0 = np.linalg.norm((path[0] - o) * sp)
+        r1 = np.linalg.norm((path[-1] - o) * sp)
+        if r0 > r1:
+            path = path[::-1].copy()
+    return path
+
+
 def outward_progress_fraction(c, path):
     if len(path) < 3:
         return 0.0
@@ -465,22 +488,32 @@ def measure(c, b, a):
     if len(path) < 2:
         return None, "path too short"
 
-    path = path[::-1].copy()
+    # Do not blindly reverse MCP traceback. Decide orientation from actual
+    # distance to the supplied aorta mask so the path is wall -> daughter.
+    path = orient_path_outward(c, path, b["ostium_idx"])
     arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0) * sp, axis=1))]
-    if arc[-1] < a.seed_mm:
-        return None, f"path {arc[-1]:.1f} < seed distance {a.seed_mm} mm"
+    path_length = float(arc[-1])
+
+    # Voxelized paths rarely land on exactly 5.000 mm. Allow one voxel of
+    # discretization tolerance, but still require an approximately 5-mm path.
+    length_tol = float(sp.max())
+    if path_length + length_tol < a.seed_mm:
+        return None, f"path {path_length:.1f} < seed distance {a.seed_mm} mm"
+    if path_length > c["aorta_length_mm"] + length_tol:
+        return None, f"path {path_length:.1f} > aorta length {c['aorta_length_mm']:.1f} mm"
 
     progress = outward_progress_fraction(c, path)
     if progress < a.min_outward_progress_frac:
         return None, f"outward progress {progress:.2f} < {a.min_outward_progress_frac:.2f}"
 
-    seed = path[int(np.argmin(np.abs(arc - a.seed_mm)))]
-    seed_i = np.rint(seed).astype(int)
-    for k in range(3):
-        seed_i[k] = np.clip(seed_i[k], 0, c["dout"].shape[k] - 1)
-    if c["dout"][tuple(seed_i)] < min(a.min_radial_reach_mm, a.seed_mm) * 0.65:
-        return None, "5 mm seed stayed too close to aorta"
+    # Seed is 5 mm along the daughter path. If discretization leaves the trace
+    # less than one voxel short of 5 mm, use its distal endpoint.
+    seed_target = min(a.seed_mm, path_length)
+    seed = path[int(np.argmin(np.abs(arc - seed_target)))]
 
+    # Do NOT require the seed to be 5 mm perpendicular from the aorta. An
+    # oblique daughter can travel 5 mm along its lumen while remaining closer
+    # than 5 mm to the mask in perpendicular distance.
     db = ndimage.distance_transform_edt(gr, sampling=sp)
     sg, _ = signature(gr, seed, sp)
     seed = recenter(db, seed, sp, float(np.clip(0.6 * sg[0], 1, 4)) if sg else 1.0)
@@ -504,6 +537,7 @@ def measure(c, b, a):
         branch_angle_deg=angle,
         outward_progress_frac=progress,
         outward_dot=outward_dot,
+        path_length_mm=path_length,
     )
 
     if d0 < a.min_caliber_mm:
@@ -633,7 +667,8 @@ def main(argv=None):
             log(
                 True,
                 f"keep {i}: angle={b['branch_angle_deg']:.1f}deg "
-                f"radial={b['radial_reach']:.1f}mm progress={b['outward_progress_frac']:.2f} "
+                f"path={b['path_length_mm']:.1f}mm radial={b['radial_reach']:.1f}mm "
+                f"progress={b['outward_progress_frac']:.2f} "
                 f"outdot={b['outward_dot']:.2f} diam={b['ostium_diam_mm']:.1f}mm",
             )
     print(
