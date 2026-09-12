@@ -49,12 +49,14 @@ def args_parse(argv=None):
         ("min-elongation", 1.8),
         ("min-caliber-mm", 1.10),
         ("max-caliber-mm", 14.0),
+        ("max-caliber-ratio", 2.5),
         ("min-bright-ratio", 0.35),
         ("trace-mm", 10.0),
         ("seed-mm", 5.0),
         ("min-radius-mm", 0.4),
         ("bifurcation-step-mm", 0.75),
-        ("dedup-mm", 1.5),
+        ("dedup-mm", 2.0),
+        ("dedup-direction-dot", 0.85),
     ]:
         p.add_argument("--" + name, type=float, default=default)
     p.add_argument("--hu-ceiling", type=float)
@@ -161,7 +163,6 @@ def geometry(c, a):
     else:
         yy, xx = cy, cx
 
-    # Estimate visible aortic centreline length in physical millimetres.
     if len(zs) > 1:
         centres_mm = np.column_stack((zs * sp[0], yy[zs] * sp[1], xx[zs] * sp[2]))
         aorta_length_mm = float(np.linalg.norm(np.diff(centres_mm, axis=0), axis=1).sum())
@@ -216,7 +217,6 @@ def geometry(c, a):
 
 
 def local_wall_normal(c, ostium_idx):
-    """Approximate outward wall normal from local aortic centreline to ostium."""
     sp = c["spacing"]
     p = np.asarray(ostium_idx, float)
     z = int(np.clip(round(p[0]), 0, c["mask"].shape[0] - 1))
@@ -228,7 +228,6 @@ def local_wall_normal(c, ostium_idx):
 
 
 def candidate_openings(c, a):
-    """Find outward tubes first, then anchor each one back to the supplied mask wall."""
     v, m, d, near, sp = c["vol"], c["mask"], c["dout"], c["near"], c["spacing"]
     bright = (v >= c["thr"]) & (v <= c["ceiling"])
     outside = bright & (~m) & (d > 0) & (d <= a.grow_mm)
@@ -298,7 +297,6 @@ def candidate_openings(c, a):
 
 
 def grow(c, b, a):
-    """Grow only through bright non-mask voxels, anchored to one local opening."""
     v, m, sp, d = c["vol"], c["mask"], c["spacing"], c["dout"]
     allowed = (
         (v >= c["thr"])
@@ -433,7 +431,6 @@ def distance_to_mask(c, p):
 
 
 def orient_path_outward(c, path, ostium_idx):
-    """Orient a traced path from the aortic wall toward the daughter."""
     path = np.asarray(path, float).copy()
     d0 = distance_to_mask(c, path[0])
     d1 = distance_to_mask(c, path[-1])
@@ -449,6 +446,15 @@ def orient_path_outward(c, path, ostium_idx):
     return path
 
 
+def true_ostium_from_path(c, path):
+    """Map the proximal traced daughter point to its nearest true aortic wall voxel."""
+    q = np.rint(path[0]).astype(int)
+    for k in range(3):
+        q[k] = np.clip(q[k], 0, c["mask"].shape[k] - 1)
+    foot = np.array([c["near"][k][tuple(q)] for k in range(3)], dtype=float)
+    return foot
+
+
 def outward_progress_fraction(c, path):
     if len(path) < 3:
         return 0.0
@@ -461,6 +467,26 @@ def outward_progress_fraction(c, path):
     dif = np.diff(vals)
     tol = 0.25 * float(c["spacing"].min())
     return float(np.mean(dif >= -tol)) if len(dif) else 0.0
+
+
+def path_caliber_samples(gr, db, path, arc, sp, path_length):
+    """Sample proximal caliber along the actual daughter path at ~2, 5 and 8 mm."""
+    samples = []
+    for target in (2.0, 5.0, 8.0):
+        if target > path_length + float(sp.max()):
+            continue
+        t = min(target, path_length)
+        p = path[int(np.argmin(np.abs(arc - t)))]
+        dims, _ = signature(gr, p, sp)
+        search_mm = float(np.clip(0.6 * dims[0], 1.0, 4.0)) if dims else 1.0
+        p = recenter(db, p, sp, search_mm)
+        qi = np.rint(p).astype(int)
+        for k in range(3):
+            qi[k] = np.clip(qi[k], 0, gr.shape[k] - 1)
+        radius = float(db[tuple(qi)])
+        if radius > 0:
+            samples.append((target, radius, p))
+    return samples
 
 
 def measure(c, b, a):
@@ -488,14 +514,17 @@ def measure(c, b, a):
     if len(path) < 2:
         return None, "path too short"
 
-    # Do not blindly reverse MCP traceback. Decide orientation from actual
-    # distance to the supplied aorta mask so the path is wall -> daughter.
     path = orient_path_outward(c, path, b["ostium_idx"])
+
+    # Improvement 1: define the actual ostium from the traced proximal path,
+    # rather than from the average of a broad wall association patch.
+    true_ostium = true_ostium_from_path(c, path)
+    if c["cap_wall"][tuple(np.rint(true_ostium).astype(int))]:
+        return None, "true ostium on flat crop cap"
+    b["ostium_idx"] = true_ostium
+
     arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0) * sp, axis=1))]
     path_length = float(arc[-1])
-
-    # Voxelized paths rarely land on exactly 5.000 mm. Allow one voxel of
-    # discretization tolerance, but still require an approximately 5-mm path.
     length_tol = float(sp.max())
     if path_length + length_tol < a.seed_mm:
         return None, f"path {path_length:.1f} < seed distance {a.seed_mm} mm"
@@ -506,15 +535,20 @@ def measure(c, b, a):
     if progress < a.min_outward_progress_frac:
         return None, f"outward progress {progress:.2f} < {a.min_outward_progress_frac:.2f}"
 
-    # Seed is 5 mm along the daughter path. If discretization leaves the trace
-    # less than one voxel short of 5 mm, use its distal endpoint.
+    db = ndimage.distance_transform_edt(gr, sampling=sp)
+
+    # Improvement 2: verify stable vessel caliber over the proximal course.
+    caliber_samples = path_caliber_samples(gr, db, path, arc, sp, path_length)
+    if len(caliber_samples) >= 2:
+        radii = np.asarray([x[1] for x in caliber_samples], float)
+        caliber_ratio = float(radii.max() / max(radii.min(), 1e-6))
+        if caliber_ratio > a.max_caliber_ratio:
+            return None, f"unstable caliber ratio {caliber_ratio:.2f} > {a.max_caliber_ratio:.2f}"
+    else:
+        caliber_ratio = 1.0
+
     seed_target = min(a.seed_mm, path_length)
     seed = path[int(np.argmin(np.abs(arc - seed_target)))]
-
-    # Do NOT require the seed to be 5 mm perpendicular from the aorta. An
-    # oblique daughter can travel 5 mm along its lumen while remaining closer
-    # than 5 mm to the mask in perpendicular distance.
-    db = ndimage.distance_transform_edt(gr, sampling=sp)
     sg, _ = signature(gr, seed, sp)
     seed = recenter(db, seed, sp, float(np.clip(0.6 * sg[0], 1, 4)) if sg else 1.0)
     dims, _axis = signature(gr, seed, sp)
@@ -538,6 +572,8 @@ def measure(c, b, a):
         outward_progress_frac=progress,
         outward_dot=outward_dot,
         path_length_mm=path_length,
+        caliber_samples_mm=[(float(t), float(2.0 * r)) for t, r, _ in caliber_samples],
+        caliber_ratio=caliber_ratio,
     )
 
     if d0 < a.min_caliber_mm:
@@ -552,8 +588,11 @@ def measure(c, b, a):
         return None, "too dim"
     if outward_dot < a.min_outward_dot:
         return None, f"outward dot {outward_dot:.2f} < {a.min_outward_dot:.2f}"
-    if angle < a.min_branch_angle_deg:
-        return None, f"branch angle {angle:.1f} < {a.min_branch_angle_deg:.1f} deg"
+
+    # Improvement 3: the branch-angle rule is a hard minimum of 20 degrees.
+    required_angle = max(20.0, float(a.min_branch_angle_deg))
+    if angle < required_angle:
+        return None, f"branch angle {angle:.1f} < {required_angle:.1f} deg"
 
     zi, yi, xi = [int(np.clip(round(q), 0, gr.shape[k] - 1)) for k, q in enumerate(seed)]
     ost = to_phys(c, b["ostium_idx"])
@@ -571,17 +610,16 @@ def measure(c, b, a):
 
 
 def deduplicate(found, a):
-    """Only collapse near-identical openings; do not merge distinct nearby origins."""
+    """Collapse traces that converge to the same true wall opening."""
     kept = []
     for b in sorted(found, key=lambda x: (-x["radial_reach"], -x["bright_ratio"])):
         duplicate = False
         for q in kept:
             d = np.linalg.norm(b["ostium_mm"] - q["ostium_mm"])
-            if d <= a.dedup_mm:
-                align = float(np.dot(b["direction"], q["direction"]))
-                if align > 0.90:
-                    duplicate = True
-                    break
+            align = float(np.dot(b["direction"], q["direction"]))
+            if d <= a.dedup_mm and align >= a.dedup_direction_dot:
+                duplicate = True
+                break
         if not duplicate:
             kept.append(b)
     return kept
@@ -655,7 +693,7 @@ def main(argv=None):
     before_dedup = len(found)
     found = deduplicate(found, a)
     if before_dedup > len(found):
-        rejects.extend(["near-identical duplicate"] * (before_dedup - len(found)))
+        rejects.extend(["same-ostium duplicate"] * (before_dedup - len(found)))
 
     caseid = os.path.basename(os.path.dirname(os.path.abspath(a.image))) or "case"
     out = emit(caseid, found, a.output)
@@ -664,12 +702,13 @@ def main(argv=None):
     if a.debug:
         log(True, Counter(rejects))
         for i, b in enumerate(found, 1):
+            calib = ",".join(f"{t:.0f}mm:{d:.1f}" for t, d in b["caliber_samples_mm"])
             log(
                 True,
                 f"keep {i}: angle={b['branch_angle_deg']:.1f}deg "
                 f"path={b['path_length_mm']:.1f}mm radial={b['radial_reach']:.1f}mm "
-                f"progress={b['outward_progress_frac']:.2f} "
-                f"outdot={b['outward_dot']:.2f} diam={b['ostium_diam_mm']:.1f}mm",
+                f"progress={b['outward_progress_frac']:.2f} outdot={b['outward_dot']:.2f} "
+                f"diam={b['ostium_diam_mm']:.1f}mm caliber=[{calib}] ratio={b['caliber_ratio']:.2f}",
             )
     print(
         f"{caseid}: {len(out['daughters'])} daughters "
