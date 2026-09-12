@@ -1,0 +1,66 @@
+Let me package this as one clean repo instead of seven loose files.Everything is in one zip. Ignore all the loose file cards above — this supersedes them.
+
+## Do this, in order
+
+**1. Unzip it and prove the code works (5 min, no data needed)**
+
+```bash
+cd ~/Downloads && unzip branchseed.zip && cd branchseed
+python3 -m venv .venv && source .venv/bin/activate
+make setup
+make selftest
+```
+
+`make selftest` builds a synthetic 512×512×174 case with 15 known daughters, detects them, and scores itself. You should see `15 daughters` and `F1 0.933`. If that prints, the whole pipeline is sound and any later failure is about your data, not the code. I verified this exact sequence from a clean extraction.
+
+**2. Get the data off Drive and into place**
+
+Download from Drive to your laptop — browser or Drive desktop app, not a connector. It's ~3 GB of NIfTI and the work has to happen where the data is; there's no point streaming it anywhere. Unpack so it looks like:
+
+```
+branchseed/data/subject001/orig1.nii
+branchseed/data/subject001/mask1.nii
+branchseed/data/subject002/...
+```
+
+Exact filenames don't matter as long as one has "orig" and one has "mask" in it. Drop the dev-subset reference JSONs into `refs/`.
+
+**3. Look before you tune**
+
+```bash
+make inspect
+```
+
+This is the step I'd most like the output of. It tells you the real lumen HU per case, whether the mask genuinely covers the lumen, actual voxel spacing, which cases have cropped end caps, and how many candidates a naive threshold produces. Paste the summary table back to me and I'll tell you which defaults to move.
+
+**4. Run and score**
+
+```bash
+make run      # all cases -> preds/ and viz/, appends features.csv
+make score
+```
+
+**5. Share it with your team**
+
+```bash
+git init && git add . && git commit -m "Branchseed: classical tri-planar branch detector"
+gh repo create branchseed --private --source=. --push
+```
+
+`.gitignore` already excludes `data/`, `refs/`, and every `.nii*` — a single case is 115 MB and GitHub will reject the push otherwise. Teammates clone, run `make setup && make selftest`, and they're at parity.
+
+**6. When you're ready to submit**
+
+```bash
+make submission
+```
+
+Assembles `submission/` with code, deps, README, predictions and visual checks laid out the way the brief asks.
+
+## Two things I'd do today, not tomorrow
+
+Message the organisers for the **minimum origin size**. It's the one unknown that moves the 45% category more than anything you can code, and it decides whether the lumbar arteries — half your branch count — are in or out.
+
+Then run `make inspect` and send me the table. Everything after that is calibration, and calibration on real numbers beats calibration on my phantom.
+
+A Google Drive connector does exist if you want it for sharing results or docs with your team later — it's in the connector directory on claude.ai, not currently connected. But it's the wrong tool for moving 3 GB of volumes; skip it for the data itself.
