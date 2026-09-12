@@ -28,17 +28,21 @@ def args_parse(argv=None):
     p.add_argument("--viz")
     p.add_argument("--features")
     p.add_argument("--debug", action="store_true")
-
     for name, default in [
         ("margin-mm", 30.0),
         ("core-erode-mm", 2.0),
         ("thr-frac", 0.40),
         ("ceiling-frac", 1.60),
-        ("touch-mm", 1.5),
+        ("touch-mm", 1.6),
+        ("distal-shell-width-mm", 2.0),
+        ("wall-assoc-mm", 3.0),
         ("cap-margin-mm", 3.0),
         ("cap-cos", 0.85),
         ("grow-mm", 22.0),
         ("min-reach-mm", 5.0),
+        ("min-radial-reach-mm", 5.0),
+        ("min-outward-progress-frac", 0.55),
+        ("min-outward-dot", 0.10),
         ("min-ostium-mm", 1.0),
         ("min-branch-angle-deg", 20.0),
         ("min-anisotropy", 1.35),
@@ -50,12 +54,13 @@ def args_parse(argv=None):
         ("seed-mm", 5.0),
         ("min-radius-mm", 0.4),
         ("bifurcation-step-mm", 0.75),
+        ("dedup-mm", 1.5),
     ]:
         p.add_argument("--" + name, type=float, default=default)
-
     p.add_argument("--hu-ceiling", type=float)
     p.add_argument("--min-wall-patch-voxels", type=int, default=2)
     p.add_argument("--min-cand-voxels", type=int, default=6)
+    p.add_argument("--min-distal-voxels", type=int, default=3)
     return p.parse_args(argv)
 
 
@@ -73,9 +78,7 @@ def unit(v):
 def to_phys(c, p):
     z, y, x = np.asarray(p, float) + c["offset"]
     return np.asarray(
-        c["img"].TransformContinuousIndexToPhysicalPoint(
-            (float(x), float(y), float(z))
-        )
+        c["img"].TransformContinuousIndexToPhysicalPoint((float(x), float(y), float(z)))
     )
 
 
@@ -89,12 +92,10 @@ def load_case(image, mask, margin, debug=False):
         or img.GetDirection() != m.GetDirection()
     ):
         raise ValueError("image and mask must use the same physical grid")
-
     a = sitk.GetArrayFromImage(img).astype(np.float32)
     mk = sitk.GetArrayFromImage(m) > 0
     if not mk.any():
         raise ValueError("aorta mask is empty")
-
     sp = np.asarray(img.GetSpacing()[::-1], float)
     idx = np.argwhere(mk)
     lo = idx.min(0)
@@ -105,7 +106,6 @@ def load_case(image, mask, margin, debug=False):
         for ax in range(3)
         for e in (0, 1)
     }
-
     pad = np.ceil(margin / sp).astype(int)
     l = np.maximum(lo - pad, 0)
     h = np.minimum(hi + pad, shape)
@@ -113,7 +113,6 @@ def load_case(image, mask, margin, debug=False):
     v = np.clip(a[sl], -1024, 3071)
     mm = mk[sl]
     log(debug, "ROI", v.shape, "spacing zyx", sp)
-
     return dict(
         img=img,
         vol=np.ascontiguousarray(v),
@@ -130,7 +129,6 @@ def intensity(c, a):
     core = din > a.core_erode_mm
     if core.sum() < 50:
         core = m
-
     lumen = float(np.median(v[core]))
     b = v[(v > -20) & (v < 120)]
     soft = float(np.median(b)) if b.size > 500 else 40.0
@@ -140,23 +138,14 @@ def intensity(c, a):
         if a.hu_ceiling is not None
         else soft + a.ceiling_frac * (lumen - soft)
     )
-    c.update(
-        din=din,
-        lumen_hu=lumen,
-        soft_hu=soft,
-        thr=thr,
-        ceiling=ceil,
-    )
+    c.update(din=din, lumen_hu=lumen, soft_hu=soft, thr=thr, ceiling=ceil)
     log(a.debug, f"HU soft={soft:.0f} lumen={lumen:.0f} band={thr:.0f}..{ceil:.0f}")
     return c
 
 
 def geometry(c, a):
     m, sp = c["mask"], c["spacing"]
-    dout, near = ndimage.distance_transform_edt(
-        ~m, sampling=sp, return_indices=True
-    )
-
+    dout, near = ndimage.distance_transform_edt(~m, sampling=sp, return_indices=True)
     zs = np.flatnonzero(m.any((1, 2)))
     cy = np.zeros(m.shape[0])
     cx = np.zeros(m.shape[0])
@@ -164,7 +153,6 @@ def geometry(c, a):
         y, x = np.nonzero(m[z])
         cy[z] = y.mean()
         cx[z] = x.mean()
-
     if len(zs) > 1:
         yy = np.interp(np.arange(m.shape[0]), zs, cy[zs])
         xx = np.interp(np.arange(m.shape[0]), zs, cx[zs])
@@ -172,8 +160,6 @@ def geometry(c, a):
         xx = ndimage.gaussian_filter1d(xx, max(0.5, 3 / sp[0]))
     else:
         yy, xx = cy, cx
-
-    # Local aortic axis in physical-distance-scaled NumPy z,y,x coordinates.
     tang = np.zeros((m.shape[0], 3))
     for z in zs:
         z0 = max(int(z) - 2, int(zs[0]))
@@ -185,20 +171,14 @@ def geometry(c, a):
                 (xx[z1] - xx[z0]) * sp[2],
             ]
         )
-
     surface = (dout > 0) & (dout <= sp.min() * 1.05)
     cap = np.zeros_like(m)
     for (ax, e), touch in c["caps"].items():
         if touch:
             w = int(np.ceil(a.cap_margin_mm / sp[ax]))
             sl = [slice(None)] * 3
-            sl[ax] = (
-                slice(0, w + 1)
-                if e == 0
-                else slice(max(m.shape[ax] - w - 1, 0), m.shape[ax])
-            )
+            sl[ax] = slice(0, w + 1) if e == 0 else slice(max(m.shape[ax] - w - 1, 0), m.shape[ax])
             cap[tuple(sl)] = 1
-
     gz, gy, gx = np.gradient(dout, *sp)
     n = np.sqrt(gz * gz + gy * gy + gx * gx) + 1e-9
     ca = np.abs(
@@ -206,15 +186,12 @@ def geometry(c, a):
         + gy * tang[:, 1, None, None]
         + gx * tang[:, 2, None, None]
     ) / n
-
     cap |= (ca > a.cap_cos) & surface
-
     cap_wall = np.zeros_like(m)
     cs = cap & surface
     if cs.any():
         f = np.stack([near[k][cs] for k in range(3)], 1)
         cap_wall[tuple(f.T)] = 1
-
     c.update(
         dout=dout,
         near=near,
@@ -228,71 +205,104 @@ def geometry(c, a):
     return c
 
 
-def wall_candidates(c, a):
-    """Create candidates only from bright voxels immediately outside the 3-D mask.
+def local_wall_normal(c, ostium_idx):
+    """Approximate outward wall normal from local aortic centreline to ostium."""
+    sp = c["spacing"]
+    p = np.asarray(ostium_idx, float)
+    z = int(np.clip(round(p[0]), 0, c["mask"].shape[0] - 1))
+    centre = np.array([p[0], c["aorta_center_y"][z], c["aorta_center_x"][z]], float)
+    radial = (p - centre) * sp
+    tangent = unit(c["aorta_tangent_zyx"][z])
+    radial = radial - np.dot(radial, tangent) * tangent
+    return unit(radial)
 
-    A candidate is anchored to the nearest supplied aorta-mask boundary patch.
-    Nothing inside the aorta mask can be a start point.
+
+def candidate_openings(c, a):
+    """Find outward tubes first, then anchor each one back to the supplied mask wall.
+
+    The distal shell at >= min_radial_reach_mm breaks the bright partial-volume rim
+    around the aorta into separate outward continuations. Each continuation is then
+    associated with a local wall patch, instead of labeling the whole bright wall rim
+    as one candidate.
     """
-    v, m, d, near = c["vol"], c["mask"], c["dout"], c["near"]
+    v, m, d, near, sp = c["vol"], c["mask"], c["dout"], c["near"], c["spacing"]
     bright = (v >= c["thr"]) & (v <= c["ceiling"])
+    outside = bright & (~m) & (d > 0) & (d <= a.grow_mm)
 
-    # Hard mask anchor: only the first small shell OUTSIDE the supplied mask.
-    # This prevents bright structures several millimetres away from becoming
-    # "ostia" merely because the aortic wall happens to be their nearest mask.
-    start_mm = max(float(a.touch_mm), float(c["spacing"].min()) * 1.05)
-    probe = bright & (~m) & (d > 0) & (d <= start_mm)
+    distal = outside & (d >= a.min_radial_reach_mm) & (
+        d <= a.min_radial_reach_mm + a.distal_shell_width_mm
+    )
+    lab, n = ndimage.label(distal, STRUCT3)
 
-    pts = np.argwhere(probe)
-    if not len(pts):
-        return []
+    start_band = outside & (d <= max(a.touch_mm, sp.min() * 1.05))
+    start_pts_all = np.argwhere(start_band)
+    start_feet_all = (
+        np.stack([near[k][start_band] for k in range(3)], 1)
+        if len(start_pts_all)
+        else np.empty((0, 3), int)
+    )
 
-    feet = np.stack([near[k][probe] for k in range(3)], 1)
-    keep = ~c["cap_wall"][tuple(feet.T)]
-    pts = pts[keep]
-    feet = feet[keep]
-    if not len(pts):
-        return []
-
-    # Preserve the originating 3-D wall patch as the candidate identity.
-    wm = np.zeros_like(m)
-    wm[tuple(feet.T)] = 1
-    lab, n = ndimage.label(wm, STRUCT3)
-    fl = lab[tuple(feet.T)]
     out = []
-
     for li in range(1, n + 1):
-        patch = np.argwhere(lab == li)
-        starts = pts[fl == li]
-        if (
-            len(patch) < a.min_wall_patch_voxels
-            or len(starts) < a.min_cand_voxels
-        ):
+        distal_pts = np.argwhere(lab == li)
+        if len(distal_pts) < a.min_distal_voxels:
             continue
 
-        # Use the wall-foot centroid as the ostium estimate.
+        distal_mask = lab == li
+        distal_feet = np.stack([near[k][distal_mask] for k in range(3)], 1)
+        valid = ~c["cap_wall"][tuple(distal_feet.T)]
+        distal_feet = distal_feet[valid]
+        if not len(distal_feet):
+            continue
+
+        foot0 = np.median(distal_feet, axis=0)
+        if len(start_pts_all):
+            wall_dist = np.linalg.norm((start_feet_all - foot0) * sp, axis=1)
+            use = wall_dist <= a.wall_assoc_mm
+            starts = start_pts_all[use]
+            feet = start_feet_all[use]
+        else:
+            starts = np.empty((0, 3), int)
+            feet = np.empty((0, 3), int)
+
+        if len(starts) < a.min_cand_voxels:
+            continue
+
+        feet_unique = np.unique(feet, axis=0)
+        if len(feet_unique) < a.min_wall_patch_voxels:
+            continue
+        ostium = feet_unique.mean(axis=0)
+
+        distal_centre = distal_pts.mean(axis=0)
+        daughter_hint = unit((distal_centre - ostium) * sp)
+        outward_dot = float(np.dot(local_wall_normal(c, ostium), daughter_hint))
+        if outward_dot < a.min_outward_dot:
+            continue
+
         out.append(
             dict(
                 wall_id=li,
-                wall_patch=patch,
+                wall_patch=feet_unique,
                 start_pts=starts,
-                ostium_idx=patch.mean(0),
+                distal_pts=distal_pts,
+                distal_centre_idx=distal_centre,
+                ostium_idx=ostium,
+                outward_dot_hint=outward_dot,
             )
         )
 
     log(
         a.debug,
-        f"mask-boundary candidates: {len(out)} "
-        f"(outside shell <= {start_mm:.2f} mm)",
+        f"outward-tube candidates: {len(out)} "
+        f"(distal shell {a.min_radial_reach_mm:.1f}.."
+        f"{a.min_radial_reach_mm + a.distal_shell_width_mm:.1f} mm from mask)",
     )
     return out
 
 
 def grow(c, b, a):
-    """Grow outward from the mask boundary through connected bright non-mask voxels."""
+    """Grow only through bright non-mask voxels, anchored to one local opening."""
     v, m, sp, d = c["vol"], c["mask"], c["spacing"], c["dout"]
-
-    # Hard rule: growth is outside the supplied aorta mask only.
     allowed = (
         (v >= c["thr"])
         & (v <= c["ceiling"])
@@ -300,37 +310,35 @@ def grow(c, b, a):
         & (d > 0)
         & (d <= a.grow_mm)
     )
-
     st = b["start_pts"]
     st = st[allowed[tuple(st.T)]]
     if not len(st):
         return None, "no reachable outside-mask start"
-
-    mcp = MCP_Geometric(
-        np.where(allowed, 1.0, np.inf),
-        sampling=tuple(sp),
-    )
+    mcp = MCP_Geometric(np.where(allowed, 1.0, np.inf), sampling=tuple(sp))
     gd, _ = mcp.find_costs([tuple(x) for x in st])
     gr = np.isfinite(gd) & (gd <= a.grow_mm) & allowed
-
     if gr.sum() < a.min_cand_voxels:
         return None, "too small after growth"
-
-    # This is path/geodesic distance travelled OUTSIDE the mask.
     reach = float(gd[gr].max())
+    radial_reach = float(d[gr].max())
     if reach < a.min_reach_mm:
-        return None, f"outside reach {reach:.1f} < {a.min_reach_mm} mm"
+        return None, f"outside path reach {reach:.1f} < {a.min_reach_mm} mm"
+    if radial_reach < a.min_radial_reach_mm:
+        return None, f"radial reach {radial_reach:.1f} < {a.min_radial_reach_mm} mm"
 
-    prox = gr & (gd <= a.min_reach_mm)
+    prox = gr & (gd <= max(a.min_reach_mm, a.seed_mm))
     p75 = float(np.percentile(v[prox], 75)) if prox.any() else -1000.0
     br = (p75 - c["soft_hu"]) / max(c["lumen_hu"] - c["soft_hu"], 1.0)
 
-    # Estimate opening calibre from the proximal outside-mask continuation.
-    band = max(float(a.touch_mm), 1.5 * float(sp.max()))
-    q = gr & (d <= band)
-    thick = max(band, float(sp.min()))
-    area = q.sum() * np.prod(sp) / thick
-    diam = float(2 * np.sqrt(max(area, 1e-6) / np.pi))
+    patch = np.asarray(b["wall_patch"])
+    if len(patch) > 1:
+        xyz = patch * sp
+        centre = xyz.mean(axis=0)
+        r = np.linalg.norm(xyz - centre, axis=1)
+        diam = float(2.0 * np.percentile(r, 75))
+    else:
+        diam = float(sp.min())
+    diam = max(diam, float(sp.min()))
     if diam < a.min_ostium_mm:
         return None, f"ostium {diam:.1f} < {a.min_ostium_mm} mm"
 
@@ -340,6 +348,7 @@ def grow(c, b, a):
         gdist=gd,
         mcp=mcp,
         reach=reach,
+        radial_reach=radial_reach,
         bright_ratio=br,
         ostium_diam_mm=diam,
     )
@@ -347,15 +356,7 @@ def grow(c, b, a):
 
 
 def signature(r, p, sp):
-    """Tri-planar shape measurement of the same 3-D grown component.
-
-    This never creates candidates; it only verifies an already mask-anchored
-    3-D candidate.
-    """
-    z, y, x = [
-        int(np.clip(round(q), 0, r.shape[k] - 1))
-        for k, q in enumerate(p)
-    ]
+    z, y, x = [int(np.clip(round(q), 0, r.shape[k] - 1)) for k, q in enumerate(p)]
     spec = [
         (0, z, (y, x), sp[1] * sp[2]),
         (1, y, (z, x), sp[0] * sp[2]),
@@ -372,7 +373,6 @@ def signature(r, p, sp):
             return None, None
         n = (lab == li).sum()
         out.append((2 * np.sqrt(max(n, 1) * area / np.pi), ax))
-
     out.sort()
     return [q[0] for q in out], out[0][1]
 
@@ -402,21 +402,9 @@ def bifurcation(c, a, sp):
     half = max(0.75 * sp.min(), 0.6 * step)
     stable = 0
     first = None
-
-    for dist_mm in np.arange(
-        max(2.0, 2 * step),
-        a.trace_mm + 1e-6,
-        step,
-    ):
-        lab, n = ndimage.label(
-            gr & (np.abs(gd - dist_mm) <= half),
-            STRUCT3,
-        )
-        sizes = (
-            ndimage.sum(lab > 0, lab, index=np.arange(1, n + 1))
-            if n
-            else []
-        )
+    for dist_mm in np.arange(max(2.0, 2 * step), a.trace_mm + 1e-6, step):
+        lab, n = ndimage.label(gr & (np.abs(gd - dist_mm) <= half), STRUCT3)
+        sizes = ndimage.sum(lab > 0, lab, index=np.arange(1, n + 1)) if n else []
         branches = sum(np.asarray(sizes) >= 2)
         if branches >= 2:
             stable += 1
@@ -430,15 +418,26 @@ def bifurcation(c, a, sp):
 
 
 def branch_angle_deg(c, ostium_idx, seed_idx):
-    """Angle between daughter chord and local aortic axis, in [0, 90] deg."""
     sp = c["spacing"]
     z = int(np.clip(round(float(ostium_idx[0])), 0, c["mask"].shape[0] - 1))
     aorta_axis = unit(c["aorta_tangent_zyx"][z])
-
-    # Compare in the same physical-distance-scaled z,y,x basis.
     daughter_axis = unit((np.asarray(seed_idx) - np.asarray(ostium_idx)) * sp)
     dot = float(np.clip(abs(np.dot(aorta_axis, daughter_axis)), 0.0, 1.0))
     return float(np.degrees(np.arccos(dot)))
+
+
+def outward_progress_fraction(c, path):
+    if len(path) < 3:
+        return 0.0
+    idx = np.rint(path).astype(int)
+    for k in range(3):
+        idx[:, k] = np.clip(idx[:, k], 0, c["dout"].shape[k] - 1)
+    vals = c["dout"][tuple(idx.T)]
+    if len(vals) >= 3:
+        vals = ndimage.median_filter(vals, size=3, mode="nearest")
+    dif = np.diff(vals)
+    tol = 0.25 * float(c["spacing"].min())
+    return float(np.mean(dif >= -tol)) if len(dif) else 0.0
 
 
 def measure(c, b, a):
@@ -446,43 +445,45 @@ def measure(c, b, a):
     gd, gr = b["gdist"], b["grown"]
     bf = bifurcation(b, a, sp)
     b["bifurcation_mm"] = bf
-
-    lim = (
-        min(a.trace_mm, bf)
-        if bf is not None and bf > a.seed_mm
-        else a.trace_mm
-    )
+    lim = min(a.trace_mm, bf) if bf is not None and bf > a.seed_mm else a.trace_mm
     win = gr & (gd <= lim)
     if not win.any():
         return None, "empty trace"
 
-    far = np.argwhere(win)[int(np.argmax(gd[win]))]
+    pts = np.argwhere(win)
+    radial = c["dout"][win]
+    best_rad = radial.max()
+    far_pool = pts[radial >= best_rad - max(0.5, sp.min())]
+    if not len(far_pool):
+        return None, "no outward trace point"
+    far = far_pool[int(np.argmax(gd[tuple(far_pool.T)]))]
+
     try:
         path = np.asarray(b["mcp"].traceback(tuple(far)), float)
     except Exception:
         return None, "traceback failed"
-
     if len(path) < 2:
         return None, "path too short"
 
-    arc = np.r_[
-        0,
-        np.cumsum(np.linalg.norm(np.diff(path, axis=0) * sp, axis=1)),
-    ]
+    path = path[::-1].copy()
+    arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0) * sp, axis=1))]
     if arc[-1] < a.seed_mm:
         return None, f"path {arc[-1]:.1f} < seed distance {a.seed_mm} mm"
 
+    progress = outward_progress_fraction(c, path)
+    if progress < a.min_outward_progress_frac:
+        return None, f"outward progress {progress:.2f} < {a.min_outward_progress_frac:.2f}"
+
     seed = path[int(np.argmin(np.abs(arc - a.seed_mm)))]
+    seed_i = np.rint(seed).astype(int)
+    for k in range(3):
+        seed_i[k] = np.clip(seed_i[k], 0, c["dout"].shape[k] - 1)
+    if c["dout"][tuple(seed_i)] < min(a.min_radial_reach_mm, a.seed_mm) * 0.65:
+        return None, "5 mm seed stayed too close to aorta"
 
     db = ndimage.distance_transform_edt(gr, sampling=sp)
     sg, _ = signature(gr, seed, sp)
-    seed = recenter(
-        db,
-        seed,
-        sp,
-        float(np.clip(0.6 * sg[0], 1, 4)) if sg else 1.0,
-    )
-
+    seed = recenter(db, seed, sp, float(np.clip(0.6 * sg[0], 1, 4)) if sg else 1.0)
     dims, _axis = signature(gr, seed, sp)
     if dims is None:
         return None, "signature undefined"
@@ -491,6 +492,8 @@ def measure(c, b, a):
     anis = d2 / max(d0, 1e-6)
     elong = b["reach"] / max(d0, 1e-6)
     angle = branch_angle_deg(c, b["ostium_idx"], seed)
+    daughter_dir = unit((seed - np.asarray(b["ostium_idx"])) * sp)
+    outward_dot = float(np.dot(local_wall_normal(c, b["ostium_idx"]), daughter_dir))
 
     b.update(
         d_min=d0,
@@ -499,6 +502,8 @@ def measure(c, b, a):
         anisotropy=anis,
         elongation=elong,
         branch_angle_deg=angle,
+        outward_progress_frac=progress,
+        outward_dot=outward_dot,
     )
 
     if d0 < a.min_caliber_mm:
@@ -511,17 +516,15 @@ def measure(c, b, a):
         return None, "not elongated"
     if b["bright_ratio"] < a.min_bright_ratio:
         return None, "too dim"
+    if outward_dot < a.min_outward_dot:
+        return None, f"outward dot {outward_dot:.2f} < {a.min_outward_dot:.2f}"
     if angle < a.min_branch_angle_deg:
         return None, f"branch angle {angle:.1f} < {a.min_branch_angle_deg:.1f} deg"
 
-    zi, yi, xi = [
-        int(np.clip(round(q), 0, gr.shape[k] - 1))
-        for k, q in enumerate(seed)
-    ]
+    zi, yi, xi = [int(np.clip(round(q), 0, gr.shape[k] - 1)) for k, q in enumerate(seed)]
     ost = to_phys(c, b["ostium_idx"])
     sm = to_phys(c, seed)
     direction = unit(sm - ost)
-
     b.update(
         seed_idx=seed,
         ostium_mm=ost,
@@ -533,6 +536,23 @@ def measure(c, b, a):
     return b, None
 
 
+def deduplicate(found, a):
+    """Only collapse near-identical openings; do not merge distinct nearby origins."""
+    kept = []
+    for b in sorted(found, key=lambda x: (-x["radial_reach"], -x["bright_ratio"])):
+        duplicate = False
+        for q in kept:
+            d = np.linalg.norm(b["ostium_mm"] - q["ostium_mm"])
+            if d <= a.dedup_mm:
+                align = float(np.dot(b["direction"], q["direction"]))
+                if align > 0.90:
+                    duplicate = True
+                    break
+        if not duplicate:
+            kept.append(b)
+    return kept
+
+
 def emit(caseid, found, path):
     found = sorted(found, key=lambda x: -x["ostium_mm"][2])
     ds = []
@@ -541,24 +561,13 @@ def emit(caseid, found, path):
             dict(
                 instance_id=f"branch_{i:03d}",
                 parent_instance_id="aorta",
-                ostium_xyz_mm=[
-                    round(float(x), 3) for x in b["ostium_mm"]
-                ],
-                seed_xyz_mm=[
-                    round(float(x), 3) for x in b["seed_mm"]
-                ],
+                ostium_xyz_mm=[round(float(x), 3) for x in b["ostium_mm"]],
+                seed_xyz_mm=[round(float(x), 3) for x in b["seed_mm"]],
                 radius_mm=round(float(b["radius_mm"]), 3),
-                direction_xyz=[
-                    round(float(x), 5) for x in b["direction"]
-                ],
+                direction_xyz=[round(float(x), 5) for x in b["direction"]],
             )
         )
-
-    out = {
-        "case_id": caseid,
-        "parent": {"instance_id": "aorta"},
-        "daughters": ds,
-    }
+    out = {"case_id": caseid, "parent": {"instance_id": "aorta"}, "daughters": ds}
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
@@ -573,32 +582,15 @@ def viz(c, found, path):
     v, m = c["vol"], c["mask"]
     views = [(0, (1, 2)), (1, (0, 2)), (2, (0, 1))]
     fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-
     for ax, (axis, (q0, q1)) in zip(axs, views):
-        ax.imshow(
-            v.max(axis),
-            cmap="gray",
-            vmin=c["soft_hu"] - 120,
-            vmax=c["lumen_hu"] + 120,
-        )
-        ax.contour(
-            m.max(axis).astype(float),
-            levels=[0.5],
-            colors="cyan",
-            linewidths=0.8,
-        )
+        ax.imshow(v.max(axis), cmap="gray", vmin=c["soft_hu"] - 120, vmax=c["lumen_hu"] + 120)
+        ax.contour(m.max(axis).astype(float), levels=[0.5], colors="cyan", linewidths=0.8)
         for b in found:
             oy, ox = b["ostium_idx"][q0], b["ostium_idx"][q1]
             sy, sx = b["seed_idx"][q0], b["seed_idx"][q1]
             ax.plot(ox, oy, "ro", mfc="none")
-            ax.annotate(
-                "",
-                xy=(sx, sy),
-                xytext=(ox, oy),
-                arrowprops=dict(arrowstyle="->", color="r"),
-            )
+            ax.annotate("", xy=(sx, sy), xytext=(ox, oy), arrowprops=dict(arrowstyle="->", color="r"))
         ax.set_axis_off()
-
     fig.tight_layout()
     fig.savefig(path, dpi=125)
     plt.close(fig)
@@ -607,18 +599,10 @@ def viz(c, found, path):
 def main(argv=None):
     a = args_parse(argv)
     t = time.time()
-    c = geometry(
-        intensity(
-            load_case(a.image, a.mask, a.margin_mm, a.debug),
-            a,
-        ),
-        a,
-    )
-
-    bases = wall_candidates(c, a)
+    c = geometry(intensity(load_case(a.image, a.mask, a.margin_mm, a.debug), a), a)
+    bases = candidate_openings(c, a)
     grown = []
     rejects = []
-
     for x in bases:
         y, why = grow(c, x, a)
         if y is None:
@@ -626,8 +610,6 @@ def main(argv=None):
         else:
             grown.append(y)
 
-    # V2 identity rule: one preserved connected 3-D wall opening = one candidate.
-    # Other orthogonal views never create extra detections.
     found = []
     for x in grown:
         y, why = measure(c, x, a)
@@ -636,20 +618,28 @@ def main(argv=None):
         else:
             found.append(y)
 
-    caseid = (
-        os.path.basename(os.path.dirname(os.path.abspath(a.image)))
-        or "case"
-    )
+    before_dedup = len(found)
+    found = deduplicate(found, a)
+    if before_dedup > len(found):
+        rejects.extend(["near-identical duplicate"] * (before_dedup - len(found)))
+
+    caseid = os.path.basename(os.path.dirname(os.path.abspath(a.image))) or "case"
     out = emit(caseid, found, a.output)
     if a.viz:
         viz(c, found, a.viz)
     if a.debug:
         log(True, Counter(rejects))
-
+        for i, b in enumerate(found, 1):
+            log(
+                True,
+                f"keep {i}: angle={b['branch_angle_deg']:.1f}deg "
+                f"radial={b['radial_reach']:.1f}mm progress={b['outward_progress_frac']:.2f} "
+                f"outdot={b['outward_dot']:.2f} diam={b['ostium_diam_mm']:.1f}mm",
+            )
     print(
         f"{caseid}: {len(out['daughters'])} daughters "
-        f"({len(bases)} mask-boundary candidates, "
-        f"{len(rejects)} rejected) in {time.time() - t:.1f}s"
+        f"({len(bases)} outward-tube candidates, {len(rejects)} rejected) "
+        f"in {time.time() - t:.1f}s"
     )
     return 0
 
