@@ -4,3 +4,4 @@ numpy>=2.4.4
 scipy>=1.17.1
 scikit-image>=0.26.0
 matplotlib>=3.10.9
+nibabel>=5.2.0   # fallback reader for non-orthonormal direction cosines
