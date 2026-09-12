@@ -68,6 +68,12 @@ def parse_args(argv=None):
     p.add_argument("--viz", default=None, help="write a visual-check PNG here")
     p.add_argument("--features", default=None, help="write per-candidate features to this CSV (calibration)")
     p.add_argument("--debug", action="store_true")
+    p.add_argument("--profile", choices=("all", "major"), default="all",
+                   help="which branches count as eligible. 'all' keeps everything down to the "
+                        "small posterior lumbars; 'major' keeps only the visceral branches "
+                        "(celiac, SMA, renals, IMA) that the published literature on this task "
+                        "annotates. Flip this the moment the organisers say what their references "
+                        "contain -- it is worth more than any threshold in here")
 
     g = p.add_argument_group("ROI")
     g.add_argument("--margin-mm", type=float, default=30.0)
@@ -143,9 +149,26 @@ def parse_args(argv=None):
     g.add_argument("--trace-mm", type=float, default=10.0)
     g.add_argument("--seed-mm", type=float, default=5.0)
     g.add_argument("--dir-fit-mm", type=float, default=3.0)
-    g.add_argument("--min-radius-mm", type=float, default=0.4)
+    g.add_argument("--min-radius-mm", type=float, default=0.4,
+                   help="floor applied to the REPORTED radius (a clamp, not a test)")
+    g.add_argument("--min-seed-radius-mm", type=float, default=None,
+                   help="eligibility test on the measured lumen radius at the seed. Set by --profile; "
+                        "a lumbar artery is ~0.8-1.0 mm, a visceral branch is 1.5 mm and up")
     g.add_argument("--merge-mm", type=float, default=2.5)
-    return p.parse_args(argv)
+    a = p.parse_args(argv)
+    # --profile sets a bundle, but anything given explicitly on the command line wins
+    given = set()
+    for tok in (argv if argv is not None else sys.argv[1:]):
+        if tok.startswith("--"):
+            given.add(tok.split("=")[0])
+    presets = {"all":   {"--min-ostium-mm": 1.0, "--min-seed-radius-mm": 0.0},
+               "major": {"--min-ostium-mm": 2.5, "--min-seed-radius-mm": 1.5}}
+    for flag, val in presets[a.profile].items():
+        if flag not in given:
+            setattr(a, flag[2:].replace("-", "_"), val)
+    if a.min_seed_radius_mm is None:
+        a.min_seed_radius_mm = 0.0
+    return a
 
 
 def _read_via_nibabel(path, label=None):
@@ -584,7 +607,11 @@ def measure(case, c, args):
                       f"({c['grown_mm3']:.0f} mm3 grown, {c['leak']:.0f}x an ideal tube)")
 
     zi, yi, xi = [int(np.clip(round(v), 0, grown.shape[k] - 1)) for k, v in enumerate(seed_idx)]
-    radius = max(float(d_branch[zi, yi, xi]), args.min_radius_mm)
+    radius_measured = float(d_branch[zi, yi, xi])
+    if radius_measured < args.min_seed_radius_mm:
+        return None, (f"seed radius {radius_measured:.2f} < {args.min_seed_radius_mm} mm "
+                      f"(below the eligible calibre for profile '{args.profile}')")
+    radius = max(radius_measured, args.min_radius_mm)
 
     # "a unit vector pointing from the ostium into the daughter vessel" -- so the
     # ostium->seed chord IS the requested quantity. An SVD fit over the geodesic path is
