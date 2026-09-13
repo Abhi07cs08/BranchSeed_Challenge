@@ -226,10 +226,22 @@ def main():
     with open(os.path.join(rd, f"{a.case_id}.json"), "w") as f:
         json.dump(payload, f, indent=2)
 
+    # A second reference set holding only the branches the published rule makes eligible
+    # (origin diameter >= 2 mm). The phantom deliberately contains sub-2 mm lumbars so the
+    # detector can be exercised on them, but scoring against those would report a recall
+    # failure for behaviour the brief actually requires.
+    rd2 = os.path.join(a.out, "refs_eligible")
+    os.makedirs(rd2, exist_ok=True)
+    elig = dict(payload)
+    elig["daughters"] = [d for d in payload["daughters"] if d["radius_mm"] * 2 >= 2.0]
+    with open(os.path.join(rd2, f"{a.case_id}.json"), "w") as f:
+        json.dump(elig, f, indent=2)
+
     print(f"{a.case_id}: {SIZE_XYZ} @ {SPACING_XYZ} mm, "
           f"aorta {p.aorta.sum()} voxels, {len(ref)} ground-truth daughters")
     print(f"  {dd}/orig1.nii.gz + mask1.nii.gz")
-    print(f"  {rd}/{a.case_id}.json")
+    print(f"  {rd}/{a.case_id}.json  (all {len(ref)})")
+    print(f"  {rd2}/{a.case_id}.json  ({len(elig['daughters'])} eligible at >=2mm)")
 
 
 if __name__ == "__main__":
