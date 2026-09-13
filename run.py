@@ -83,7 +83,8 @@ def parse_args(argv=None):
     g.add_argument("--max-leak", type=float, default=30.0)
     g.add_argument("--min-caliber-mm", type=float, default=1.10)
     g.add_argument("--max-caliber-mm", type=float, default=10.0)
-    g.add_argument("--max-ostium-mm", type=float, default=12.0)
+    g.add_argument("--max-ostium-mm", type=float, default=12.0,
+                   help="diagnostic only; oversized inferred wall patches are no longer hard-rejected")
     g.add_argument("--max-bright-ratio", type=float, default=1.05)
     g.add_argument("--min-bright-ratio", type=float, default=0.35)
 
@@ -362,10 +363,11 @@ def place_ostium(case, c, args):
     diam = float(2*np.sqrt(max(area, 1e-6)/np.pi))
     if diam < args.min_ostium_mm:
         return None, f"ostium {diam:.1f} < {args.min_ostium_mm} mm"
-    if diam > args.max_ostium_mm:
-        return None, f"ostium {diam:.1f} > {args.max_ostium_mm} mm"
+    # Large inferred wall patches can be caused by coarse voxels, obliquity, or nearby
+    # connected lumen. Keep the estimate as a diagnostic instead of hard-rejecting it.
     c.update(ostium_idx=centre, patch_pts=feet, patch_counts=counts,
-             proximal_mask=prox, ostium_diam_mm=diam)
+             proximal_mask=prox, ostium_diam_mm=diam,
+             ostium_oversize=bool(diam > args.max_ostium_mm))
     return c, None
 
 
@@ -457,10 +459,15 @@ def recentre(field, point, spacing, reach_mm):
 
 
 def path_distance_from_aorta(case, path):
-    pts = np.rint(path).astype(int)
-    for k in range(3):
-        pts[:,k] = np.clip(pts[:,k], 0, case["d_out"].shape[k]-1)
-    return case["d_out"][pts[:,0], pts[:,1], pts[:,2]].astype(float)
+    pts = np.asarray(path, float)
+    if pts.ndim == 1:
+        pts = pts[None, :]
+    return ndimage.map_coordinates(
+        case["d_out"],
+        [pts[:,0], pts[:,1], pts[:,2]],
+        order=1,
+        mode="nearest",
+    ).astype(float)
 
 
 def conservative_bifurcation_arc(case, c, path, arc, args):
@@ -510,14 +517,20 @@ def trace_from_wall(case, c, args):
     arc = np.concatenate([[0.0], np.cumsum(steps)])
     if arc[-1] < args.min_reach_mm:
         return None, f"wall-to-lumen reach {arc[-1]:.1f} < {args.min_reach_mm} mm"
-    upto = arc <= min(args.seed_mm, arc[-1]) + 1e-6
-    p5 = path[upto]
-    if len(p5) < 2:
-        return None, "not enough early path samples"
-    dout = path_distance_from_aorta(case, p5)
+
+    # Evaluate outward progress at fixed physical distances along the continuous
+    # polyline. This avoids rejecting valid small vessels just because the native
+    # 1.5 mm grid provides too few discrete traceback samples before 5 mm.
+    early_end = min(float(args.min_reach_mm), float(arc[-1]))
+    sample_step = 0.5
+    targets = np.arange(0.0, early_end, sample_step)
+    if len(targets) == 0 or targets[-1] < early_end - 1e-6:
+        targets = np.append(targets, early_end)
+    early_path = np.asarray([interpolate_on_path(path, arc, t) for t in targets], float)
+    dout = path_distance_from_aorta(case, early_path)
     gain = float(dout[-1] - dout[0])
     increments = np.diff(dout)
-    frac = float(np.mean(increments >= -0.25*case["spacing"].min())) if len(increments) else 0.0
+    frac = float(np.mean(increments >= -0.25*case["spacing"].min())) if len(increments) else 1.0
     if gain < args.min_outward_gain_mm:
         return None, f"outward gain {gain:.2f} < {args.min_outward_gain_mm} mm"
     if frac < args.min_outward_fraction:
