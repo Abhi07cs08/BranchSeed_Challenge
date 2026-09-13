@@ -1,0 +1,730 @@
+<title>Ostium Review</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  /* Reading-room palette: a radiology workstation is dark because the image is dark.
+     Committed single theme; every colour is painted explicitly so the page holds on
+     either host ground. The chrome accent is the same teal the aorta is drawn in. */
+  :root {
+    --void:   #0A0E0D;
+    --panel:  #121816;
+    --raise:  #1A2220;
+    --raise2: #202A28;
+    --line:   #26302E;
+    --line-2: #37423F;
+    --ink:    #E6EFEC;
+    --dim:    #8DA29C;
+    --faint:  #61736E;
+    --accent: #4FD1A5;
+    --agree:  #7DD9B0;
+    --outside:#D9A05B;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--void);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { padding: 0 16px 40px; max-width: 1680px; margin: 0 auto; }
+
+  /* ---------------------------------------------------------------- masthead */
+  header {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 16px 28px;
+    padding-block: 26px 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 {
+    margin: 0; font-size: 21px; font-weight: 600; letter-spacing: -0.015em;
+    text-wrap: balance;
+  }
+  .sub { margin: 3px 0 0; color: var(--dim); font-size: 13px; max-width: 62ch; }
+  .stamp {
+    margin-left: auto; display: flex; align-items: center; gap: 8px;
+    font-family: var(--cond); font-size: 11px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--outside);
+    border: 1px solid #4A3A22; background: #1E1810;
+    padding: 5px 10px; border-radius: 3px; white-space: nowrap;
+  }
+
+  /* ---------------------------------------------------------------- shell */
+  .shell {
+    display: grid; gap: 16px; padding-block: 16px;
+    grid-template-columns: 258px minmax(0, 1fr) 322px;
+    align-items: start;
+  }
+  @media (max-width: 1180px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .rail-left  { order: 3; }
+    .stage      { order: 1; }
+    .rail-right { order: 2; }
+  }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+
+  .eyebrow {
+    font-family: var(--cond); font-size: 10.5px; font-weight: 600;
+    letter-spacing: 0.13em; text-transform: uppercase; color: var(--faint);
+  }
+  .head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 14px; border-bottom: 1px solid var(--line);
+  }
+  .body { padding: 14px; display: grid; gap: 13px; }
+
+  /* ---------------------------------------------------------------- controls */
+  label.field { display: grid; gap: 6px; }
+  select, button, input[type="range"] { font-family: inherit; font-size: 13px; }
+  select {
+    width: 100%; appearance: none; background: var(--raise) url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'>\
+<path d='M1 1l4 4 4-4' fill='none' stroke='%238DA29C' stroke-width='1.4'/></svg>") no-repeat right 11px center;
+    color: var(--ink); border: 1px solid var(--line-2); border-radius: 3px;
+    padding: 8px 30px 8px 10px; cursor: pointer;
+  }
+  select:focus-visible, button:focus-visible, .branch:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+
+  .segmented { display: flex; flex-wrap: wrap; gap: 3px; }
+  .segmented button {
+    flex: 1 1 auto; background: transparent; color: var(--dim);
+    border: 1px solid transparent; border-radius: 3px; padding: 6px 9px; cursor: pointer;
+    font-size: 12.5px; white-space: nowrap;
+  }
+  .segmented button:hover { color: var(--ink); background: var(--raise); }
+  .segmented button[aria-pressed="true"] {
+    background: var(--raise2); color: var(--ink); border-color: var(--line-2);
+  }
+
+  .slider-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .slider-row .val { font-family: var(--mono); font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 18px;
+    background: transparent; cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-runnable-track { height: 2px; background: var(--line-2); border-radius: 2px; }
+  input[type="range"]::-moz-range-track { height: 2px; background: var(--line-2); border-radius: 2px; }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%;
+    background: var(--accent); margin-top: -5px; border: none;
+  }
+  input[type="range"]::-moz-range-thumb { width: 12px; height: 12px; border: none; border-radius: 50%; background: var(--accent); }
+
+  .kbd {
+    font-family: var(--mono); font-size: 10.5px; color: var(--dim);
+    border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; background: var(--raise);
+  }
+  .hint { color: var(--faint); font-size: 12px; line-height: 1.55; }
+
+  /* ---------------------------------------------------------------- stage */
+  .stage { display: grid; gap: 0; }
+  .stage-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 11px 14px; border: 1px solid var(--line); border-bottom: none;
+    border-radius: 4px 4px 0 0; background: var(--panel);
+  }
+  .case-name { font-weight: 600; font-size: 15px; }
+  .case-meta { color: var(--dim); font-size: 12.5px; }
+  .live { margin-left: auto; display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12.5px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+
+  .viewport {
+    position: relative; background: #000;
+    border: 1px solid var(--line); border-bottom: none;
+    height: clamp(380px, 60vh, 720px);
+  }
+  #gl { width: 100%; height: 100%; display: block; }
+  .veil {
+    position: absolute; inset: 0; display: grid; place-content: center; gap: 8px;
+    text-align: center; background: #000; color: var(--dim); font-size: 13px; padding: 24px;
+  }
+  .veil[hidden] { display: none !important; }
+  .veil .spin {
+    width: 22px; height: 22px; margin: 0 auto; border-radius: 50%;
+    border: 2px solid var(--line-2); border-top-color: var(--accent);
+    animation: spin .9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .veil .spin { animation: none; } }
+
+  .scope {
+    position: absolute; left: 12px; bottom: 10px;
+    font-family: var(--mono); font-size: 11px; color: #6E817C;
+    pointer-events: none; text-shadow: 0 1px 3px #000;
+  }
+  .scope-r { left: auto; right: 12px; }
+
+  /* scanner-style footer strip */
+  .strip {
+    display: flex; flex-wrap: wrap; gap: 0;
+    border: 1px solid var(--line); border-radius: 0 0 4px 4px; background: var(--panel);
+  }
+  .strip > div {
+    flex: 1 1 150px; padding: 10px 14px; border-right: 1px solid var(--line); min-width: 0;
+  }
+  .strip > div:last-child { border-right: none; }
+  .strip .v {
+    font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums;
+    margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---------------------------------------------------------------- worklist */
+  .count {
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+    background: var(--raise2); border: 1px solid var(--line-2);
+    border-radius: 3px; padding: 1px 7px;
+  }
+  .worklist { display: grid; }
+  .branch {
+    display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 11px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+    background: transparent; border-left: 2px solid transparent; text-align: left;
+    color: inherit; font: inherit; cursor: pointer; width: 100%;
+    border-top: none; border-right: none;
+  }
+  .branch:hover { background: var(--raise); }
+  .branch[aria-current="true"] { background: var(--raise2); border-left-color: var(--chip, var(--accent)); }
+  .chip { width: 10px; height: 10px; border-radius: 2px; background: var(--chip); }
+  .branch .name { font-size: 13px; font-weight: 500; }
+  .branch .where { display: block; font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 1px; }
+  .branch .tag { display: inline-block; }
+  .branch .cal { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; text-align: right; }
+  .branch .cal span { color: var(--faint); font-size: 10.5px; }
+
+  .tag {
+    display: inline-block; font-family: var(--cond); font-size: 10px; font-weight: 600;
+    letter-spacing: 0.07em; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 2px; margin-top: 3px;
+  }
+  .tag.ok  { color: var(--agree);   background: #14271F; border: 1px solid #2E4A3C; }
+  .tag.out { color: var(--outside); background: #241C10; border: 1px solid #45351D; }
+
+  /* ---------------------------------------------------------------- geometry */
+  .geo { padding: 14px; display: grid; gap: 12px; border-top: 1px solid var(--line); }
+  .bignums { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .bignums .n {
+    font-family: var(--mono); font-size: 23px; font-weight: 500; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .bignums .n u { font-size: 12px; text-decoration: none; color: var(--dim); margin-left: 3px; }
+  table.coords { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  table.coords th {
+    font-family: var(--cond); font-weight: 600; font-size: 10px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--faint); text-align: right; padding: 3px 0;
+  }
+  table.coords th:first-child { text-align: left; }
+  table.coords td { padding: 3px 0; text-align: right; font-variant-numeric: tabular-nums; }
+  table.coords td:first-child { text-align: left; color: var(--dim); font-family: var(--sans); font-size: 12px; }
+
+  button.action {
+    width: 100%; background: var(--raise); color: var(--ink);
+    border: 1px solid var(--line-2); border-radius: 3px; padding: 9px 12px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+  }
+  button.action:hover { background: var(--raise2); border-color: var(--accent); }
+
+  .note { color: var(--faint); font-size: 11.5px; line-height: 1.55; }
+
+  /* ---------------------------------------------------------------- coverage */
+  .cov { display: grid; gap: 9px; padding: 14px; }
+  .bar { height: 5px; border-radius: 3px; background: var(--raise2); overflow: hidden; display: flex; }
+  .bar i { display: block; height: 100%; background: var(--agree); }
+  .cov-line { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; }
+  .cov-line b { font-family: var(--mono); font-weight: 500; font-variant-numeric: tabular-nums; }
+
+  footer {
+    border-top: 1px solid var(--line); margin-top: 20px; padding-top: 16px;
+    color: var(--faint); font-size: 12px; display: grid; gap: 6px;
+  }
+  a { color: var(--accent); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Ostium Review</h1>
+      <p class="sub">Every artery leaving the abdominal aorta, found by classical computer vision on
+        the CT alone &mdash; then handed back for a human to confirm, one origin at a time.</p>
+    </div>
+    <div class="stamp">Research prototype &middot; not for diagnosis</div>
+  </header>
+
+  <div class="shell">
+
+    <!-- ------------------------------------------------------ left instrument rail -->
+    <div class="rail-left" style="display:grid;gap:16px">
+      <section class="card">
+        <div class="head"><span class="eyebrow">Case</span><span class="eyebrow" id="case-count">&mdash;</span></div>
+        <div class="body">
+          <label class="field">
+            <span class="eyebrow">Study</span>
+            <select id="case-select" aria-label="Select a case"></select>
+          </label>
+          <div class="hint" id="case-files">&mdash;</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="head"><span class="eyebrow">Display</span></div>
+        <div class="body">
+          <label class="field">
+            <span class="eyebrow">CT window</span>
+            <select id="window-select" aria-label="CT window preset">
+              <option value="250,500" selected>Angiography &nbsp;250 / 500 HU</option>
+              <option value="50,400">Soft tissue &nbsp;50 / 400 HU</option>
+              <option value="300,1500">Vascular wide &nbsp;300 / 1500 HU</option>
+              <option value="500,2000">Bone &nbsp;500 / 2000 HU</option>
+            </select>
+          </label>
+
+          <div class="field">
+            <div class="slider-row">
+              <span class="eyebrow">Overlay</span>
+              <span class="val" id="op-val">72%</span>
+            </div>
+            <input type="range" id="opacity" min="0" max="100" value="72" aria-label="Overlay opacity">
+          </div>
+
+          <div class="field">
+            <span class="eyebrow">Layout</span>
+            <div class="segmented" id="layout" role="group" aria-label="View layout">
+              <button data-slice="3" aria-pressed="true">Multiplanar</button>
+              <button data-slice="0" aria-pressed="false">Axial</button>
+              <button data-slice="1" aria-pressed="false">Coronal</button>
+              <button data-slice="2" aria-pressed="false">Sagittal</button>
+              <button data-slice="4" aria-pressed="false">3D</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="eyebrow">Focus</span>
+            <div class="segmented" id="focus" role="group" aria-label="Overlay focus">
+              <button data-focus="all" aria-pressed="true">All branches</button>
+              <button data-focus="one" aria-pressed="false">Selected only</button>
+            </div>
+          </div>
+
+          <p class="hint">
+            Hold <span class="kbd">H</span> to hide the overlay and check the raw CT underneath.
+            <span class="kbd">&uarr;</span><span class="kbd">&darr;</span> steps through the worklist.
+            Drag to window, scroll to slice.
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <!-- ------------------------------------------------------------- centre stage -->
+    <div class="stage">
+      <div class="stage-head">
+        <span class="case-name" id="case-name">&mdash;</span>
+        <span class="case-meta" id="case-kind">Abdominal aorta &middot; CT angiography</span>
+        <span class="live"><span class="dot"></span><span id="live-text">Loading</span></span>
+      </div>
+
+      <div class="viewport">
+        <canvas id="gl"></canvas>
+        <div class="scope" id="scope-l">LPS millimetres</div>
+        <div class="scope scope-r" id="scope-r">&nbsp;</div>
+        <div class="veil" id="veil"><div class="spin"></div><div id="veil-text">Loading volume&hellip;</div></div>
+      </div>
+
+      <div class="strip">
+        <div><span class="eyebrow">Matrix</span><div class="v" id="s-dims">&mdash;</div></div>
+        <div><span class="eyebrow">Voxel</span><div class="v" id="s-vox">&mdash;</div></div>
+        <div><span class="eyebrow">Detection time</span><div class="v" id="s-time">&mdash;</div></div>
+        <div><span class="eyebrow">Daughters found</span><div class="v" id="s-n">&mdash;</div></div>
+      </div>
+    </div>
+
+    <!-- --------------------------------------------------------- right review rail -->
+    <div class="rail-right" style="display:grid;gap:16px">
+      <section class="card">
+        <div class="head">
+          <span class="eyebrow">Branch worklist</span>
+          <span class="count" id="n-branches">0</span>
+        </div>
+        <div class="worklist" id="worklist"></div>
+        <div class="geo" id="geo">
+          <span class="eyebrow">Select a branch</span>
+          <p class="note">Choosing a row drives the crosshair to that ostium in all three planes and
+            lights the vessel in the 3D render.</p>
+        </div>
+      </section>
+
+      <section class="card" id="cov-card" hidden>
+        <div class="head"><span class="eyebrow">Against the expert draft</span></div>
+        <div class="cov">
+          <div class="cov-line"><span>Reference origins recovered</span><b id="cov-num">&mdash;</b></div>
+          <div class="bar"><i id="cov-bar" style="width:0%"></i></div>
+          <p class="note" id="cov-note"></p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <footer>
+    <div>Detections are algorithmic and unreviewed. Confirm every origin against the source images before use.</div>
+    <div id="built">&nbsp;</div>
+  </footer>
+</div>
+
+<script src="niivue.umd.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // Colours a clinician can tell apart on black, and that survive being drawn thin.
+  var PALETTE = ["#F2B03C","#6FA8FF","#F0685A","#B98BFF","#3FC8D8","#9FD356",
+                 "#FF8FB8","#E4924A","#7FE3C6","#A79BFF","#FFD166","#FF7A59"];
+  var AORTA = "#2E8C74";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var cases = [], current = null, sel = -1, nv = null, hidOverlay = false, loadToken = 0;
+  var focusMode = "all", opacity = 0.72, win = [250, 500];
+
+  function hex2rgb(h) {
+    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  }
+  function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+  function f2(v) { return (Math.round(v * 100) / 100).toFixed(2); }
+
+  // ------------------------------------------------------------------ boot
+  function boot() {
+    if (typeof niivue === "undefined" || !niivue.Niivue) {
+      fail("The image engine did not load.", "niivue.umd.js is missing from this build.");
+      return;
+    }
+    nv = new niivue.Niivue({
+      backColor: [0.039, 0.055, 0.051, 1],
+      crosshairColor: [0.31, 0.82, 0.647, 1],
+      crosshairWidth: 1,
+      show3Dcrosshair: true,
+      isColorbar: false,
+      isOrientCube: true,
+      multiplanarPadPixels: 5,
+      isRadiologicalConvention: false
+    });
+    nv.attachToCanvas($("gl"));
+    try {
+      nv.opts.multiplanarShowRender = 1;     // ALWAYS
+      nv.opts.multiplanarLayout = 2;         // GRID: three planes + render, 2x2
+      nv.opts.multiplanarEqualSize = true;
+      nv.opts.renderOverlayBlend = 1.0;
+    } catch (e) {}
+
+    if (window.ResizeObserver) {
+      new ResizeObserver(function () { try { nv.resizeListener(); } catch (e) {} })
+        .observe($("gl").parentElement);
+    }
+
+    fetch("cases.json", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (d) {
+        cases = d.cases || [];
+        if (!cases.length) { fail("No cases in this build.", "Run make_viewer.py first."); return; }
+        $("built").textContent = "Bundle generated " + (d.generated || "") +
+          "\u00A0\u00B7\u00A0" + cases.length + " studies\u00A0\u00B7\u00A0detector run with default settings, no per-case flags.";
+        $("case-count").textContent = cases.length + " available";
+        var s = $("case-select");
+        cases.forEach(function (c, i) {
+          var o = document.createElement("option");
+          o.value = String(i); o.textContent = c.id;
+          s.appendChild(o);
+        });
+        s.addEventListener("change", function () { load(+s.value); });
+        load(0);
+      })
+      .catch(function (e) {
+        fail("Could not read cases.json.", String(e && e.message ? e.message : e));
+      });
+  }
+
+  // Volumes travel as base64 inside JSON so the page works from any plain static folder.
+  function grab(url) {
+    return fetch(url, { cache: "force-cache" }).then(function (r) {
+      if (!r.ok) throw new Error(url + " → HTTP " + r.status);
+      return r.json();
+    });
+  }
+
+  function fail(title, detail) {
+    $("veil").hidden = false;
+    $("veil-text").innerHTML = "<strong style='color:#E6EFEC'>" + title + "</strong><br>" + detail;
+    var sp = document.querySelector(".veil .spin"); if (sp) sp.style.display = "none";
+    $("live-text").textContent = "Unavailable";
+  }
+
+  // ------------------------------------------------------------------ load a case
+  function load(i) {
+    current = cases[i]; sel = -1;
+    $("case-name").textContent = current.id;
+    $("case-files").textContent = current.source_image + "\u00A0\u00A0\u00B7\u00A0\u00A0" + current.source_mask;
+    $("s-time").textContent = f2(current.seconds) + " s";
+    $("s-n").textContent = String(current.n);
+    $("n-branches").textContent = String(current.n);
+    $("live-text").textContent = "Loading";
+    $("veil").hidden = false;
+    $("veil-text").textContent = "Loading volume\u2026";
+    var sp = document.querySelector(".veil .spin"); if (sp) sp.style.display = "";
+    renderWorklist();
+    renderCoverage();
+    $("geo").innerHTML = '<span class="eyebrow">Select a branch</span>' +
+      '<p class="note">Choosing a row drives the crosshair to that ostium in all three planes ' +
+      'and lights the vessel in the 3D render.</p>';
+
+    var token = ++loadToken;
+    Promise.all([grab(current.ct), grab(current.seg)]).then(function (b) {
+      return Promise.all([
+        niivue.NVImage.loadFromBase64({
+          base64: b[0].b64, name: "ct.nii.gz", colormap: "gray",
+          cal_min: win[0] - win[1] / 2, cal_max: win[0] + win[1] / 2, trustCalMinMax: true
+        }),
+        niivue.NVImage.loadFromBase64({
+          base64: b[1].b64, name: "seg.nii.gz", colormap: "red", opacity: opacity
+        })
+      ]);
+    }).then(function (vols) {
+      if (token !== loadToken) return;              // a faster click won the race
+      while (nv.volumes.length) nv.removeVolumeByIndex(0);
+      nv.addVolume(vols[0]);
+      nv.addVolume(vols[1]);
+      applyWindow();
+      applyLabels();
+      var v = nv.volumes[0];
+      $("s-dims").textContent = v.dims[1] + "\u00A0\u00D7\u00A0" + v.dims[2] + "\u00A0\u00D7\u00A0" + v.dims[3] + " vox";
+      $("s-vox").textContent = f2(v.pixDims[1]) + "\u00A0\u00D7\u00A0" + f2(v.pixDims[2]) +
+                               "\u00A0\u00D7\u00A0" + f2(v.pixDims[3]) + " mm";
+      $("scope-r").textContent = current.id;
+      $("veil").hidden = true;
+      $("live-text").textContent = "Ready to review";
+    }).catch(function (e) {
+      fail("Could not load this study.", String(e && e.message ? e.message : e));
+    });
+  }
+
+  function applyWindow() {
+    if (!nv.volumes.length) return;
+    nv.volumes[0].cal_min = win[0] - win[1] / 2;
+    nv.volumes[0].cal_max = win[0] + win[1] / 2;
+    nv.updateGLVolume();
+  }
+
+  // The label volume holds 1 = parent aorta, 2.. = one value per traced daughter, so a
+  // discrete LUT is the honest way to colour it: no interpolation between branches.
+  function applyLabels() {
+    if (nv.volumes.length < 2) return;
+    var n = current.daughters.length;
+    var R = [0, 0], G = [0, 0], B = [0, 0], A = [0, 0], I = [0, 1], names = ["", "aorta"];
+    var a = hex2rgb(AORTA);
+    R[1] = a[0]; G[1] = a[1]; B[1] = a[2]; A[1] = hidOverlay ? 0 : 150;
+    for (var k = 0; k < n; k++) {
+      var c = hex2rgb(PALETTE[k % PALETTE.length]);
+      var on = !hidOverlay && (focusMode === "all" || sel === k || sel < 0);
+      R.push(c[0]); G.push(c[1]); B.push(c[2]);
+      A.push(on ? (sel === k ? 255 : 215) : 0);
+      I.push(k + 2); names.push(current.daughters[k].id);
+    }
+    try {
+      nv.volumes[1].setColormapLabel({ R: R, G: G, B: B, A: A, I: I, labels: names });
+    } catch (e) {
+      nv.volumes[1].colormap = "red";
+    }
+    nv.setOpacity(1, hidOverlay ? 0 : opacity);
+    nv.updateGLVolume();
+  }
+
+  // ------------------------------------------------------------------ worklist
+  function renderWorklist() {
+    var wl = $("worklist");
+    wl.innerHTML = "";
+    var errs = (current.reference && current.reference.errors) || null;
+    current.daughters.forEach(function (d, k) {
+      var b = document.createElement("button");
+      b.className = "branch";
+      b.type = "button";
+      b.style.setProperty("--chip", PALETTE[k % PALETTE.length]);
+      b.setAttribute("aria-current", "false");
+      var tag = "";
+      if (errs) {
+        tag = errs[d.id] !== undefined
+          ? '<span class="tag ok">agrees \u00B7 ' + f2(errs[d.id]) + ' mm</span>'
+          : '<span class="tag out">no reference here</span>';
+      }
+      b.innerHTML =
+        '<span class="chip"></span>' +
+        '<span><span class="name">' + d.id.replace("branch_", "Branch ") + '</span>' +
+          '<span class="where">ostium z ' + f1(d.ostium[2]) + ' mm</span>' + tag + '</span>' +
+        '<span class="cal">' + f2(d.radius) + '<span> mm r</span></span>';
+      b.addEventListener("click", function () { select(k); });
+      wl.appendChild(b);
+    });
+  }
+
+  function select(k) {
+    sel = k;
+    var rows = document.querySelectorAll(".branch");
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].setAttribute("aria-current", i === k ? "true" : "false");
+    }
+    if (rows[k]) rows[k].scrollIntoView({ block: "nearest" });
+    var d = current.daughters[k];
+    try {
+      nv.scene.crosshairPos = nv.mm2frac(d.ostium);
+      nv.drawScene();
+    } catch (e) {}
+    applyLabels();
+    renderGeometry(d, k);
+  }
+
+  function renderGeometry(d, k) {
+    var errs = (current.reference && current.reference.errors) || null;
+    var agree = errs ? (errs[d.id] !== undefined
+      ? '<span class="tag ok">reference agrees within ' + f2(errs[d.id]) + ' mm</span>'
+      : '<span class="tag out">outside the annotated window</span>') : "";
+    var dir = d.direction.map(function (v) { return (v >= 0 ? " " : "") + f2(v); }).join("  ");
+    $("geo").innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<span class="chip" style="--chip:' + PALETTE[k % PALETTE.length] + '"></span>' +
+        '<span class="eyebrow" style="color:var(--dim)">' + d.id.replace("branch_", "Branch ") + '</span>' +
+      '</div>' + agree +
+      '<div class="bignums">' +
+        '<div><span class="eyebrow">Lumen radius</span><div class="n">' + f2(d.radius) + '<u>mm</u></div></div>' +
+        '<div><span class="eyebrow">Seed offset</span><div class="n">5.0<u>mm</u></div></div>' +
+      '</div>' +
+      '<table class="coords"><thead><tr><th>Physical &middot; LPS</th><th>X</th><th>Y</th><th>Z</th></tr></thead>' +
+      '<tbody>' +
+        '<tr><td>Ostium</td><td>' + f1(d.ostium[0]) + '</td><td>' + f1(d.ostium[1]) + '</td><td>' + f1(d.ostium[2]) + '</td></tr>' +
+        '<tr><td>Seed</td><td>' + f1(d.seed[0]) + '</td><td>' + f1(d.seed[1]) + '</td><td>' + f1(d.seed[2]) + '</td></tr>' +
+        '<tr><td>Direction</td><td>' + f2(d.direction[0]) + '</td><td>' + f2(d.direction[1]) + '</td><td>' + f2(d.direction[2]) + '</td></tr>' +
+      '</tbody></table>' +
+      '<button class="action" id="export">Save this case as JSON</button>' +
+      '<p class="note">Radius is measured on the distance transform at the 5 mm seed, not at the ' +
+      'ostium &mdash; the origin flares where it meets the aorta. Direction is the unit ostium&rarr;seed chord.</p>';
+    var ex = $("export");
+    if (ex) ex.addEventListener("click", exportCase);
+  }
+
+  // ------------------------------------------------------------------ coverage
+  function renderCoverage() {
+    var r = current.reference;
+    if (!r || !r.n_ref) { $("cov-card").hidden = true; return; }
+    $("cov-card").hidden = false;
+    $("cov-num").textContent = r.matched + " of " + r.n_ref;
+    $("cov-bar").style.width = (100 * r.matched / r.n_ref).toFixed(0) + "%";
+    var extra = current.n - r.matched;
+    $("cov-note").textContent =
+      "Matched one-to-one within " + r.match_mm + " mm of a reference ostium. " +
+      (extra > 0
+        ? extra + " further detection" + (extra === 1 ? "" : "s") + " fall outside the segment the " +
+          "draft annotation covers \u2014 the reference is marked review-pending and is not certified exhaustive, " +
+          "so these are candidates for a reader, not errors by construction."
+        : "No detections outside the annotated segment.");
+  }
+
+  // ------------------------------------------------------------------ export
+  function exportCase() {
+    var payload = {
+      case_id: current.id,
+      parent: { instance_id: "aorta" },
+      daughters: current.daughters.map(function (d) {
+        return {
+          instance_id: d.id, parent_instance_id: "aorta",
+          ostium_xyz_mm: d.ostium, seed_xyz_mm: d.seed,
+          radius_mm: d.radius, direction_xyz: d.direction
+        };
+      })
+    };
+    var text = JSON.stringify(payload, null, 2);
+    var btn = $("export");
+    var say = function (m) { if (btn) { btn.textContent = m; setTimeout(function () {
+      if (btn) btn.textContent = "Save this case as JSON"; }, 2400); } };
+
+    if (window.claude && window.claude.use) {
+      window.claude.use("downloads").then(function (dl) {
+        if (!dl) return copy(text, say);
+        dl.save({ filename: current.id + ".json", data: text })
+          .then(function () { say("Saved"); })
+          .catch(function () { copy(text, say); });
+      }).catch(function () { copy(text, say); });
+    } else {
+      var blob = new Blob([text], { type: "application/json" });
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = current.id + ".json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+      say("Saved");
+    }
+  }
+
+  function copy(text, say) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(function () { say("Copied to clipboard"); })
+        .catch(function () { say("Could not save here"); });
+    } else { say("Could not save here"); }
+  }
+
+  // ------------------------------------------------------------------ controls
+  $("window-select").addEventListener("change", function (e) {
+    win = e.target.value.split(",").map(Number);
+    applyWindow();
+  });
+
+  $("opacity").addEventListener("input", function (e) {
+    opacity = e.target.value / 100;
+    $("op-val").textContent = e.target.value + "%";
+    if (!hidOverlay && nv && nv.volumes.length > 1) nv.setOpacity(1, opacity);
+  });
+
+  $("layout").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    var bs = this.querySelectorAll("button");
+    for (var i = 0; i < bs.length; i++) bs[i].setAttribute("aria-pressed", String(bs[i] === b));
+    var st = +b.dataset.slice;
+    try {
+      nv.setSliceType(st);
+      if (st === 3) { nv.opts.multiplanarShowRender = 1; nv.opts.multiplanarLayout = 2; }
+      nv.drawScene();
+    } catch (err) {}
+  });
+
+  $("focus").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    var bs = this.querySelectorAll("button");
+    for (var i = 0; i < bs.length; i++) bs[i].setAttribute("aria-pressed", String(bs[i] === b));
+    focusMode = b.dataset.focus;
+    applyLabels();
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    if (e.key === "h" || e.key === "H") {
+      if (!hidOverlay) { hidOverlay = true; applyLabels(); }
+      e.preventDefault(); return;
+    }
+    if (!current) return;
+    if (e.key === "ArrowDown" || e.key === "j") {
+      select(Math.min(current.daughters.length - 1, sel + 1)); e.preventDefault();
+    } else if (e.key === "ArrowUp" || e.key === "k") {
+      select(Math.max(0, sel <= 0 ? 0 : sel - 1)); e.preventDefault();
+    }
+  });
+  document.addEventListener("keyup", function (e) {
+    if ((e.key === "h" || e.key === "H") && hidOverlay) { hidOverlay = false; applyLabels(); }
+  });
+
+  boot();
+})();
+</script>

@@ -1,8 +1,119 @@
 # Branchseed — direct aortic daughter detection
 
 Pure classical computer vision. **No trained model, no GPU, no network at runtime, no
-per-case tuning.** Runs in ~8 s and under 1.5 GB on one CPU core.
+per-case tuning.** Runs in 2–5 s per eval case, 20–30 s on the 0.78 mm training grids — well inside the 60 s budget.
 
+## Measured against the organisers' reference annotations
+
+Scored on EVAL_SET cases 19–23 (19 reference daughters), one-to-one bipartite matching on
+ostium distance, no per-case flags:
+
+| | match 3 mm | match 5 mm |
+|---|---|---|
+| precision / recall / **F1** | 0.556 / 0.789 / **0.652** | 0.630 / 0.895 / **0.739** |
+| ostium error (mean / median) | 1.41 / 1.09 mm | 1.69 / 1.23 mm |
+| seed on the reference path | 87% within 3 mm | 76% within 3 mm |
+| direction error (mean / median) | 15.1° / 11.0° | 14.2° / 10.0° |
+| radius error | 0.29 mm | 0.28 mm |
+| **composite (45/25/15)** | **0.547** | **0.615** |
+
+**17 of the 19 reference daughters are found.** Per case at 5 mm: 19 → 3/3, 20 → 3/4,
+21 → 3/3, 22 → 6/6, 23 → 2/3. Ten unmatched detections, five of them in case 21 — whose own
+review notes say the annotation "is not certified exhaustive" and list structures
+deliberately left out. Not one unmatched detection is a near miss: every one is at least
+12.6 mm from the nearest reference ostium, so none of them is a mislocated true branch.
+
+Synthetic self-test (`make selftest`, 0.78 mm voxels), scored against the eligible
+references only (≥ 2 mm diameter, matching the published rule): **F1 0.923, precision 1.000,
+ostium 0.72 mm, direction 6.2°, composite 0.760.**
+
+## Why predicted counts do not equal reference counts
+
+The draft references cover only part of each supplied aorta:
+
+| case | aorta length | reference ostia span | coverage |
+|---|---|---|---|
+| 19 | 68 mm | 282–305 | 35% |
+| 20 | 66 mm | 340–358 | 28% |
+| 21 | 99 mm | 402–414 | **12%** |
+| 22 | 208 mm | 243–337 | 45% |
+| 23 | 52 mm | 260–266 | **10%** |
+
+Every false positive in case 21 lies **outside** that window, 12–70 mm from the nearest
+labelled daughter voxel. The package's own README says the annotations "do not guarantee
+that every eligible origin has been found", the case notes say individual cases are "not
+certified exhaustive", and all 19 branches are stamped `expert_review_pending`.
+
+So the count gap is mostly annotation coverage, not detector error. Matching the counts
+exactly would mean detecting only inside whatever window each case happens to have been
+annotated in — unknowable at test time, and wrong if the reference is later completed.
+**This should be confirmed with the organisers before it is treated as a scoring target.**
+
+## What the eval data taught us
+
+The eval grids are **1.5 mm isotropic**, not the 0.78 × 0.78 × 1.5 mm of the training
+subjects. A 2 mm lumen is 1.3 voxels across, and several thresholds that were calibrated on
+finer voxels were deleting real branches:
+
+* `--min-anisotropy` at 1.35 rejected two 4.5 mm high-confidence branches in case 21 that
+  had been found within 1.2 mm of their reference. At 1.5 mm sampling a 5 mm vessel is three
+  voxels wide and discrete shape statistics collapse toward 1. Now 1.10.
+* `--rind-mm` at 1.6 mm removed the entire proximal segment of a thin branch before it could
+  be measured. Now 0.8 mm.
+* `--max-leak` at 6 rejected a real branch in case 23. Now 30.
+* Cropped-end detection keyed only off the *volume* boundary, so a mask that simply stops
+  inside the volume got no protection — including the terminal iliac division, which the
+  brief puts out of scope. The mask's own first and last slices are now always treated as
+  ends. Worth 1 false positive on the eval set (F1 0.698 -> 0.714).
+* **Two ostia 5 mm apart became one detection.** At 1.5 mm voxels the partial-volume haloes
+  of neighbouring branches touch before their lumens do, so both origins land in a single
+  collar component — one component, one ostium, and the second branch disappears with no
+  filter ever reporting it. This was the whole of the remaining recall loss: case 20 refs
+  3+4 (5.9 mm apart) and case 23 refs 2+3 (4.9 mm apart). `split_fused()` raises the
+  threshold inside each component until distinct bright cores appear (the haloes fade
+  first), and splits when two cores each reach the aortic wall. Recall 0.789 -> 0.895,
+  F1 0.714 -> 0.739. Guarded by `--split-core-voxels` (6): a core smaller than that is
+  noise, and splitting on it costs more precision than it buys recall.
+* `--rind-mm` is now **measured per case**, not fixed. The shell just outside the mask is
+  bright on some scans and fat on others, and the two batches in this dataset want opposite
+  settings — neither voxel size nor a constant predicts which. run.py samples that shell's
+  brightness and sizes the exclusion from it (0.5 voxels when dark, 2 voxels when bright).
+  Held fixed at 0.8 mm, three training subjects returned **zero** branches: the bright rind
+  survived, fused the whole aortic wall into one component, and produced a single candidate
+  with a 70 mm "ostium" that swallowed every real branch.
+* The seed-radius eligibility gate was removed. It is resolution-biased — on 1.5 mm data the
+  distance transform quantises the radius upward so everything passed, on 0.8 mm data it
+  measured honestly and rejected real 2 mm vessels — and the reviewer checklist explicitly
+  says not to treat the seed diameter as the origin diameter. `--min-ostium-mm` carries the
+  2 mm rule on its own.
+* `--thr-frac` is now **derived from voxel size** rather than fixed. Coarse voxels blur
+  bright lumen into their neighbours, so a low threshold merges structures and leaks;
+  fine voxels need a lower one or thin branches vanish. Measured: 0.50 suits the 1.5 mm
+  isotropic eval grids, 0.40 suits the 0.78 mm training grids. Holding it fixed at 0.50
+  cost three of eight detections on subject011. Pass `--thr-frac` to override.
+* The ostium was being snapped to the nearest voxel centre — a 0.75 mm quantisation on a
+  quantity scored in millimetres. It is now a count-weighted sub-voxel centroid, pushed
+  0.25 mm radially outward toward the lumen boundary where the reference convention places
+  it. Measured bias before the correction was 0.46 mm inward.
+
+**The reference `direction_xyz` is exactly the normalised ostium→seed chord** — verified at
+0.0° across all 19 references. Our convention already matched, which means the remaining
+direction error is purely positional: improving the ostium improves the direction for free.
+
+
+## The review page (`make report`)
+
+    python report.py --data data --preds preds --out report.html
+    python report.py --data ~/Downloads/EVAL_SET --preds preds --refs evalrefs --out report.html
+
+One self-contained HTML file — no server, no network, images embedded as base64 — showing
+every case, three orthogonal slab views with the parent aorta and every detected branch
+lumen painted in, and a table of measurements. Clicking a branch locates it in all three
+views at once and dims the rest. With `--refs` each row also carries its distance to the
+matched reference, so a reviewer sees at a glance which detections are corroborated.
+
+This is the deliverable for the brief's requirement to "display information in a unique way
+that will be useful for clinicians", and it drops straight into the submission zip.
 
 ## Repo layout
 
@@ -12,6 +123,9 @@ per-case tuning.** Runs in ~8 s and under 1.5 GB on one CPU core.
       inspect_data.py     characterise the dataset before touching thresholds
       make_phantom.py     synthetic case WITH ground truth, for the self-test
       run_all.sh          batch over a whole folder, then score
+      report.py           interactive self-contained HTML review page
+      audit.py            per-candidate sheets + reference builder from your own marks
+      make_eval_refs.py   EVAL_SET annotations.json -> scoring references
       Makefile            make setup / selftest / inspect / run / score / submission
       requirements.txt
       data/               <- the dataset from Google Drive (gitignored)
