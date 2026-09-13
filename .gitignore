@@ -1,0 +1,14 @@
+data/
+viewer/data/
+phantom/data/
+viz/
+evalviz/
+preds/
+bestpreds/
+*.nii
+*.nii.gz
+*.zip
+*.pyc
+__pycache__/
+.DS_Store
+branchseed_FINAL/
