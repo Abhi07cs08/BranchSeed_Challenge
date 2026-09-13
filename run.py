@@ -21,6 +21,10 @@ METHOD
           three small, similar  -> a blob: plaque, lymph node, noise
           three large           -> the fill has leaked into an organ
 
+  Candidate geometry is anchored to the FULL 3D binary aorta mask. Distance-to-aorta is
+  the 3D Euclidean distance transform of that mask; a candidate must live outside the mask
+  in 3D, not merely outside the aortic contour in an axial slice.
+
   That is a discrete, inspectable form of Hessian eigenvalue analysis: one small
   eigenvalue along the vessel, two large across it. Unlike a Frangi response it is three
   numbers you can print and argue about when a case fails, which is why it is used here.
@@ -118,6 +122,8 @@ def parse_args(argv=None):
     g.add_argument("--min-reach-mm", type=float, default=5.0, help="brief: lumen followable >=5 mm")
     g.add_argument("--min-ostium-mm", type=float, default=1.0,
                    help="floor on origin size. ASK THE ORGANISERS FOR THIS NUMBER")
+    g.add_argument("--min-branch-angle-deg", type=float, default=15.0,
+                   help="minimum 3D angle between daughter direction and the local aortic axis")
 
     g = p.add_argument_group("tri-planar shape tests")
     g.add_argument("--min-anisotropy", type=float, default=1.35,
@@ -156,7 +162,6 @@ def parse_args(argv=None):
                         "a lumbar artery is ~0.8-1.0 mm, a visceral branch is 1.5 mm and up")
     g.add_argument("--merge-mm", type=float, default=2.5)
     a = p.parse_args(argv)
-    # --profile sets a bundle, but anything given explicitly on the command line wins
     given = set()
     for tok in (argv if argv is not None else sys.argv[1:]):
         if tok.startswith("--"):
@@ -172,31 +177,20 @@ def parse_args(argv=None):
 
 
 def _read_via_nibabel(path, label=None):
-    """
-    Last resort for headers SimpleITK refuses, above all
-    "ITK only supports orthonormal direction cosines".
-
-    A NIfTI affine stores direction and spacing together, and rounding in the header can
-    leave the direction matrix very slightly non-orthonormal. ITK rejects it outright.
-    We take the nearest orthonormal matrix (polar decomposition via SVD), which for a
-    rounding-level defect changes geometry by far less than a voxel. nibabel reports RAS,
-    ITK works in LPS, so the first two axes flip -- getting that wrong would silently mirror
-    every coordinate we emit.
-    """
     try:
         import nibabel as nib
     except ImportError:
         raise RuntimeError(f"cannot read {path}: install nibabel to handle non-standard headers")
 
     nii = nib.load(path)
-    arr = np.asanyarray(nii.dataobj)                       # (i, j, k)
+    arr = np.asanyarray(nii.dataobj)
     aff = np.asarray(nii.affine, float)
-    m_lps = np.diag([-1.0, -1.0, 1.0]) @ aff[:3, :3]       # RAS -> LPS
+    m_lps = np.diag([-1.0, -1.0, 1.0]) @ aff[:3, :3]
     spacing = np.linalg.norm(m_lps, axis=0)
     spacing[spacing < 1e-9] = 1.0
     direction = m_lps / spacing
     u, _, vt = np.linalg.svd(direction)
-    ortho = u @ vt                                          # nearest orthonormal matrix
+    ortho = u @ vt
     skew = float(np.abs(ortho - direction).max())
 
     img = sitk.GetImageFromArray(np.ascontiguousarray(arr.transpose(2, 1, 0)))
@@ -212,15 +206,6 @@ def _read_via_nibabel(path, label=None):
 
 
 def read_image_any(path):
-    """
-    Read a volume even when its filename lies about its compression.
-
-    SimpleITK chooses its reader from the file extension, so a gzip stream named `.nii`
-    fails with "Unable to determine ImageIO reader" despite being a perfectly valid file.
-    This dataset ships some subjects that way. Rather than renaming the user's data, we
-    re-present the same bytes under a truthful name and read that. Kept deliberately: the
-    hidden evaluation set may have the same quirk, and a crash there scores zero.
-    """
     if not os.path.isfile(path):
         raise FileNotFoundError(f"no such file: {path}")
     try:
@@ -240,8 +225,6 @@ def read_image_any(path):
             try:
                 img = sitk.ReadImage(alias)
             except RuntimeError:
-                # hand nibabel the TRUTHFULLY-NAMED alias, not the original: nibabel
-                # sniffs the extension too and cannot open gzip bytes called ".nii"
                 return _read_via_nibabel(alias, os.path.basename(path))
             print(f"note: {os.path.basename(path)} is gzip-compressed despite its .nii name",
                   file=sys.stderr)
@@ -264,16 +247,7 @@ def equiv_diam(n_vox, area_per_vox):
     return 2.0 * np.sqrt(max(n_vox, 1) * area_per_vox / np.pi)
 
 
-# ============================================================== the tri-planar signature
 def triplanar_signature(region, point, spacing):
-    """
-    Equivalent diameter (mm) of the 2D connected component of `region` containing `point`,
-    in each of the three orthogonal planes through it.
-
-    Returns (dims, axis_of_min) where dims is sorted ascending and axis_of_min is the numpy
-    axis (0=z, 1=y, 2=x) whose slicing gave the smallest extent -- i.e. the vessel's axis,
-    because slicing perpendicular to a tube shows its cross-section.
-    """
     zi, yi, xi = [int(np.clip(round(v), 0, region.shape[k] - 1)) for k, v in enumerate(point)]
     planes = [
         (0, zi, (yi, xi), spacing[1] * spacing[2]),
@@ -295,14 +269,6 @@ def triplanar_signature(region, point, spacing):
 
 
 def recentre(field, point, spacing, reach_mm):
-    """
-    Move `point` to the widest spot within `reach_mm` of it -- i.e. onto the lumen axis.
-
-    Bounded on purpose. Unconstrained hill-climbing on a distance transform wanders ALONG
-    the vessel (the EDT is near-constant down a uniform tube) until it finds a wider region,
-    which breaks the "5 mm along the path" definition of the seed. Allowing displacement of
-    about one lumen radius crosses the vessel without sliding down it.
-    """
     p = np.array([int(np.clip(round(v), 0, field.shape[k] - 1)) for k, v in enumerate(point)])
     w = np.maximum(np.ceil(reach_mm / spacing).astype(int), 1)
     sl = tuple(slice(max(p[k] - w[k], 0), min(p[k] + w[k] + 1, field.shape[k])) for k in range(3))
@@ -317,7 +283,6 @@ def recentre(field, point, spacing, reach_mm):
     return np.array([sl[k].start + off[k] for k in range(3)], float)
 
 
-# ------------------------------------------------------------------------ stage 1: load
 def load_and_crop(image_path, mask_path, margin_mm, debug=False):
     img = read_image_any(image_path)
     msk = read_image_any(mask_path)
@@ -329,7 +294,7 @@ def load_and_crop(image_path, mask_path, margin_mm, debug=False):
     if not mask.any():
         raise ValueError("aorta mask is empty")
 
-    spacing = np.array(list(reversed(img.GetSpacing())), float)      # numpy z,y,x order
+    spacing = np.array(list(reversed(img.GetSpacing())), float)
     orig_shape = np.array(mask.shape)
     idx = np.argwhere(mask)
     lo, hi = idx.min(axis=0), idx.max(axis=0) + 1
@@ -361,7 +326,6 @@ def to_physical(case, idx_zyx):
     return np.array(case["img"].TransformContinuousIndexToPhysicalPoint((float(x), float(y), float(z))))
 
 
-# ------------------------------------------------------------- stage 2: intensity model
 def intensity_model(case, core_erode_mm, thr_frac, ceiling_frac, hu_ceiling,
                     hu_ceiling_max=600.0, lumen_pct=75.0, debug=False):
     vol, mask, sp = case["vol"], case["mask"], case["spacing"]
@@ -389,7 +353,6 @@ def intensity_model(case, core_erode_mm, thr_frac, ceiling_frac, hu_ceiling,
     return case
 
 
-# --------------------------------------------------- stage 3: aorta geometry + end caps
 def aorta_geometry(case, cap_margin_mm, cap_cos, debug=False):
     mask, sp = case["mask"], case["spacing"]
     d_out, near_idx = ndimage.distance_transform_edt(~mask, sampling=sp, return_indices=True)
@@ -434,34 +397,35 @@ def aorta_geometry(case, cap_margin_mm, cap_cos, debug=False):
     log(debug, f"wall {surface.sum()} voxels; caps remove {(surface & cap_zone).sum()}; "
                f"searchable {searchable.sum()}")
     case.update(d_out=d_out, near_idx=near_idx, surface=surface,
-                searchable=searchable, cap_zone=cap_zone)
+                searchable=searchable, cap_zone=cap_zone, aorta_tangent_zyx=tangent)
     return case
 
 
-# -------------------------------------------------------------- stage 4: candidates
 def find_candidates(case, collar_mm, rind_mm, touch_mm, min_voxels, debug=False):
-    vol, d_out = case["vol"], case["d_out"]
-    collar = (d_out > rind_mm) & (d_out <= collar_mm)
+    vol, d_out, mask = case["vol"], case["d_out"], case["mask"]
+    # Hard 3D mask anchor: d_out is the Euclidean distance to the FULL binary mask.
+    # Explicit ~mask keeps candidate generation outside the supplied aorta in every plane.
+    collar = (~mask) & (d_out > rind_mm) & (d_out <= collar_mm)
     bright = (vol >= case["thr"]) & (vol <= case["hu_ceiling"])
     seedable = collar & bright & ~case["cap_zone"]
 
     lab, n = ndimage.label(seedable, structure=STRUCT3)
     if n == 0:
         return [], lab
-    near_wall = (d_out <= rind_mm + touch_mm) & ~case["cap_zone"]
+    near_wall = (~mask) & (d_out <= rind_mm + touch_mm) & ~case["cap_zone"]
     touching = set(np.unique(lab[near_wall & seedable])) - {0}
     sizes = ndimage.sum(seedable, lab, index=np.arange(1, n + 1))
     cands = [int(i) for i in sorted(touching) if sizes[i - 1] >= min_voxels]
-    log(debug, f"{n} collar components, {len(touching)} touch the wall, {len(cands)} pass size")
+    log(debug, f"{n} 3D outside-mask collar components, {len(touching)} touch the wall, "
+               f"{len(cands)} pass size")
     return cands, lab
 
 
-# ------------------------------------------------------------ stage 5: grow + reach
 def grow(case, lab, li, args):
     vol, mask, sp = case["vol"], case["mask"], case["spacing"]
     seed_region = (lab == li)
     bright = (vol >= case["thr"]) & (vol <= case["hu_ceiling"]) & ~mask
-    reachable = bright & (case["d_out"] > args.rind_mm) & (case["d_out"] <= args.grow_mm)
+    reachable = bright & ~mask & (case["d_out"] > args.rind_mm) & (case["d_out"] <= args.grow_mm)
 
     start = np.argwhere(seed_region & (case["d_out"] <= args.rind_mm + args.touch_mm))
     if start.size == 0:
@@ -483,17 +447,7 @@ def grow(case, lab, li, args):
                 bright_ratio=ratio, grown_mm3=grown_mm3), None
 
 
-# ------------------------------------------------------- stage 6: ostium + trunk merge
 def place_ostium(case, c, args):
-    """
-    Ostium = centroid of the WALL FOOT POINTS of the branch's most proximal segment.
-
-    Every background voxel knows its nearest aorta voxel (from the distance transform's
-    index map), so the proximal collar of the branch maps directly onto the patch of wall
-    it emerges from. This is local by construction, which a dilate-and-intersect patch is
-    not: once the bright rind is in play, dilation smears the patch along the whole wall
-    and the centroid lands nowhere near the real opening.
-    """
     sp, d_out, near = case["spacing"], case["d_out"], case["near_idx"]
     band = float(args.rind_mm + 1.5 * sp.max())
     prox = c["grown"] & (d_out <= band)
@@ -509,9 +463,6 @@ def place_ostium(case, c, args):
     c["ostium_idx"] = feet[int(np.argmin(d2))].astype(float)
     c["patch_pts"] = feet
 
-    # Size the opening from the proximal segment's VOLUME divided by its thickness.
-    # Counting unique wall voxels quantises hard: a 1.7 mm vessel is ~2 voxels across, so
-    # the foot-point count reads it as 0.9 mm and the eligibility floor throws it away.
     thickness = max(band - args.rind_mm, float(sp.min()))
     area = float(prox.sum()) * float(np.prod(sp)) / thickness
     c["ostium_diam_mm"] = float(2.0 * np.sqrt(max(area, 1e-6) / np.pi))
@@ -523,7 +474,6 @@ def place_ostium(case, c, args):
 
 
 def merge_trunks(case, cands, merge_mm):
-    """One hole in the wall is one instance, however fast it divides afterwards."""
     sp = case["spacing"]
     keep, dropped = [], set()
     adj = float(np.max(sp)) * 1.8
@@ -550,7 +500,15 @@ def merge_trunks(case, cands, merge_mm):
     return keep
 
 
-# ------------------------------ stage 7: trace, measure, tri-planar shape acceptance
+def local_aorta_axis_physical(case, ostium_idx):
+    """Return the local aortic centreline tangent as a unit vector in physical xyz space."""
+    z = int(np.clip(round(float(ostium_idx[0])), 0, case["mask"].shape[0] - 1))
+    t_zyx = unit(case["aorta_tangent_zyx"][z])
+    t_xyz_image = np.array([t_zyx[2], t_zyx[1], t_zyx[0]], float)
+    direction_matrix = np.asarray(case["img"].GetDirection(), float).reshape(3, 3)
+    return unit(direction_matrix @ t_xyz_image)
+
+
 def measure(case, c, args):
     sp, vol = case["spacing"], case["vol"]
     gdist, grown = c["gdist"], c["grown"]
@@ -570,15 +528,11 @@ def measure(case, c, args):
     arc = np.concatenate([[0.0], np.cumsum(steps)])
     seed_idx = path[int(np.argmin(np.abs(arc - min(args.seed_mm, arc[-1]))))]
 
-    # A geodesic shortest path is NOT a centreline -- through a wide vessel it cuts corners
-    # and runs near the wall, which under-reads the radius and puts the seed off the lumen
-    # axis. Hill-climb the branch distance transform to land on the local ridge.
     d_branch = ndimage.distance_transform_edt(grown, sampling=sp)
     probe, _ = triplanar_signature(grown, seed_idx, sp)
     reach = float(np.clip(0.6 * probe[0], 1.0, 4.0)) if probe else 1.0
     seed_idx = recentre(d_branch, seed_idx, sp, reach)
 
-    # --- tri-planar signature, evaluated at the re-centred seed (5 mm out)
     dims, axis_min = triplanar_signature(grown, seed_idx, sp)
     if dims is None:
         return None, "signature undefined at seed"
@@ -613,9 +567,6 @@ def measure(case, c, args):
                       f"(below the eligible calibre for profile '{args.profile}')")
     radius = max(radius_measured, args.min_radius_mm)
 
-    # "a unit vector pointing from the ostium into the daughter vessel" -- so the
-    # ostium->seed chord IS the requested quantity. An SVD fit over the geodesic path is
-    # noisier: the path cuts corners near the wall and is quantised over only a few voxels.
     ost_mm = to_physical(case, c["ostium_idx"])
     seed_mm = to_physical(case, seed_idx)
     chord = seed_mm - ost_mm
@@ -630,7 +581,15 @@ def measure(case, c, args):
         if np.dot(direction, chord) < 0:
             direction = -direction
 
-    # the small-extent axis should agree with the fitted direction; a mismatch is a warning
+    # True 3D branch angle relative to the local aortic centreline axis.
+    aorta_axis = local_aorta_axis_physical(case, c["ostium_idx"])
+    dot = float(np.clip(abs(np.dot(direction, aorta_axis)), 0.0, 1.0))
+    branch_angle_deg = float(np.degrees(np.arccos(dot)))
+    c["branch_angle_deg"] = branch_angle_deg
+    if branch_angle_deg < args.min_branch_angle_deg:
+        return None, (f"branch angle {branch_angle_deg:.1f} < "
+                      f"{args.min_branch_angle_deg:.1f} deg")
+
     phys_of_numpy_axis = {0: 2, 1: 1, 2: 0}
     c["axis_dot"] = float(abs(direction[phys_of_numpy_axis[axis_min]]))
 
@@ -639,9 +598,8 @@ def measure(case, c, args):
     return c, None
 
 
-# ------------------------------------------------------------------- stage 8: outputs
 def emit(case_id, cands, out_path):
-    ordered = sorted(cands, key=lambda c: -c["ostium_mm"][2])      # superior -> inferior
+    ordered = sorted(cands, key=lambda c: -c["ostium_mm"][2])
     daughters = [{
         "instance_id": f"branch_{n:03d}",
         "parent_instance_id": "aorta",
@@ -660,7 +618,7 @@ def emit(case_id, cands, out_path):
 def write_features(path, case_id, rows):
     cols = ["case_id", "accepted", "reject", "reach_mm", "d_min_mm", "d_mid_mm", "d_max_mm",
             "anisotropy", "elongation", "leak", "grown_mm3", "bright_ratio", "ostium_diam_mm",
-            "radius_mm", "axis_dot", "ostium_x", "ostium_y", "ostium_z"]
+            "radius_mm", "branch_angle_deg", "axis_dot", "ostium_x", "ostium_y", "ostium_z"]
     new = not os.path.exists(path)
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     with open(path, "a", newline="") as f:
@@ -673,16 +631,6 @@ def write_features(path, case_id, rows):
 
 
 def visual_check(case, cands, png_path, slab_mm=25.0):
-    """
-    Three orthogonal MIPs, but restricted to a slab around the aorta and with the DETECTED
-    regions painted on.
-
-    A full-depth MIP of an abdomen is dominated by spine: bone saturates, projects over
-    everything, and every marker appears to sit on a vertebra whether it does or not. That
-    makes the figure useless as evidence. Limiting the projection to voxels within
-    `slab_mm` of the lumen drops most of the vertebral body, and overlaying what the
-    detector actually grew answers the real question -- tube or bone blob.
-    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -762,13 +710,15 @@ def main(argv=None):
                    bright_ratio=round(c["bright_ratio"], 3),
                    grown_mm3=round(c.get("grown_mm3", 0), 0),
                    leak=round(c["leak"], 2) if "leak" in c else "",
-                   ostium_diam_mm=round(c["ostium_diam_mm"], 2))
+                   ostium_diam_mm=round(c["ostium_diam_mm"], 2),
+                   branch_angle_deg=round(c["branch_angle_deg"], 2) if "branch_angle_deg" in c else "")
         for k in ("d_min", "d_mid", "d_max", "anisotropy", "elongation"):
             if k in c:
                 row[k + ("_mm" if k.startswith("d_") else "")] = round(c[k], 3)
         if c2 is None:
             rejects.append(why); rows.append(row); continue
         row.update(accepted=1, reject="", radius_mm=round(c2["radius_mm"], 3),
+                   branch_angle_deg=round(c2["branch_angle_deg"], 2),
                    axis_dot=round(c2["axis_dot"], 3),
                    ostium_x=round(c2["ostium_mm"][0], 2), ostium_y=round(c2["ostium_mm"][1], 2),
                    ostium_z=round(c2["ostium_mm"][2], 2))
@@ -787,7 +737,8 @@ def main(argv=None):
         for c in final:
             log(True, f"  d=({c['d_min']:.1f},{c['d_mid']:.1f},{c['d_max']:.1f})mm "
                       f"anis {c['anisotropy']:.2f} elong {c['elongation']:.2f} "
-                      f"r {c['radius_mm']:.2f} axis_dot {c['axis_dot']:.2f}")
+                      f"r {c['radius_mm']:.2f} angle {c['branch_angle_deg']:.1f}deg "
+                      f"axis_dot {c['axis_dot']:.2f}")
 
     print(f"{case_id}: {len(payload['daughters'])} daughters "
           f"({len(labels)} candidates, {len(rejects)} rejected) in {time.time() - t0:.1f}s")
